@@ -9,6 +9,7 @@ resolver = "3"
 members = [
     "crates/sublayer-core",
     "crates/sublayer-media",
+    "crates/sublayer-ai",
 ]
 
 [workspace.package]
@@ -23,6 +24,7 @@ repository = "https://github.com/sublayer-rs/sublayer"
 # Internal workspace crates.
 sublayer-core = { path = "crates/sublayer-core" }
 sublayer-media = { path = "crates/sublayer-media" }
+sublayer-ai = { path = "crates/sublayer-ai" }
 
 # Serialization & identity.
 serde = { version = "1.0", features = ["derive"] }
@@ -40,6 +42,10 @@ tracing = "0.1"
 
 # Media decoding.
 hound = "3.5"
+
+# AI speech pipeline.
+reqwest = { version = "0.13", default-features = false, features = ["stream", "rustls", "rustls-native-certs"] }
+sha2 = "0.11"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
