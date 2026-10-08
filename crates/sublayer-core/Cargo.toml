@@ -1,0 +1,21 @@
+[package]
+name = "sublayer-core"
+description = "Domain models, XDG paths, and error types shared by every Sublayer crate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+directories.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

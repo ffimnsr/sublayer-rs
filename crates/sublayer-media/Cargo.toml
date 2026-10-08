@@ -1,0 +1,25 @@
+[package]
+name = "sublayer-media"
+description = "FFprobe metadata, Whisper-ready audio extraction, and waveform caches"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+sublayer-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hound.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+which.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

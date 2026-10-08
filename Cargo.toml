@@ -1,0 +1,49 @@
+# Sublayer workspace manifest.
+#
+# Members are added as roadmap phases land (see PLAN.md §7). Phase 1 ships the
+# foundation and media crates; later phases append `sublayer-ai`,
+# `sublayer-subtitles`, `sublayer-export`, `sublayer-gui`, and `sublayer-cli`.
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/sublayer-core",
+    "crates/sublayer-media",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Sublayer Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sublayer-rs/sublayer"
+
+[workspace.dependencies]
+# Internal workspace crates.
+sublayer-core = { path = "crates/sublayer-core" }
+sublayer-media = { path = "crates/sublayer-media" }
+
+# Serialization & identity.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Async & system integration.
+tokio = { version = "1.43", features = ["full"] }
+directories = "6.0"
+which = "8.0"
+tempfile = "3.14"
+thiserror = "2.0"
+tracing = "0.1"
+
+# Media decoding.
+hound = "3.5"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
