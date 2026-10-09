@@ -76,6 +76,11 @@ pub fn detect_speech(samples: &[f32], sample_rate: u32, config: &VadConfig) -> V
     let rate = u64::from(sample_rate);
     let frame_size = (sample_rate * config.frame_ms / 1_000) as usize;
     let hop_size = (sample_rate * config.hop_ms / 1_000) as usize;
+    // Sub-frame rates (e.g. 30 ms frames at sample_rate < 1000) would yield
+    // zero-length windows, an empty slice, and an infinite hop loop.
+    if frame_size == 0 || hop_size == 0 {
+        return Vec::new();
+    }
     let threshold = config.threshold_db;
 
     // Raw speech runs from the frame classifier.
@@ -235,6 +240,15 @@ mod tests {
             .is_empty()
         );
         assert!(detect_speech(&[], RATE, &VadConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn sub_frame_sample_rates_are_rejected_without_looping() {
+        // sample_rate below ~33 Hz makes the 30 ms frame window zero samples
+        // long; the detector must bail out instead of spinning forever.
+        let samples = vec![0.1_f32; 32];
+        assert!(detect_speech(&samples, 1, &VadConfig::default()).is_empty(),);
+        assert!(detect_speech(&samples, 20, &VadConfig::default()).is_empty());
     }
 
     #[test]

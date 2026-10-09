@@ -10,6 +10,7 @@ members = [
     "crates/sublayer-core",
     "crates/sublayer-media",
     "crates/sublayer-ai",
+    "crates/sublayer-whisper",
 ]
 
 [workspace.package]
@@ -25,6 +26,7 @@ repository = "https://github.com/sublayer-rs/sublayer"
 sublayer-core = { path = "crates/sublayer-core" }
 sublayer-media = { path = "crates/sublayer-media" }
 sublayer-ai = { path = "crates/sublayer-ai" }
+sublayer-whisper = { path = "crates/sublayer-whisper" }
 
 # Serialization & identity.
 serde = { version = "1.0", features = ["derive"] }
@@ -48,7 +50,9 @@ reqwest = { version = "0.13", default-features = false, features = ["stream", "r
 sha2 = "0.11"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# deny by default so every `unsafe` needs an explicit, reviewable `allow`;
+# only `sublayer-whisper` (the FFI wrapper) opts out in its own manifest.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 dbg_macro = "warn"

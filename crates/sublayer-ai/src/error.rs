@@ -53,7 +53,7 @@ pub enum AiError {
 
     /// whisper.cpp refused to load the model or run inference.
     #[error("whisper error: {0}")]
-    Whisper(#[from] whisper_rs::WhisperError),
+    Whisper(#[from] sublayer_whisper::WhisperError),
 
     /// The blocking transcription worker panicked.
     #[error("background transcription task failed: {0}")]

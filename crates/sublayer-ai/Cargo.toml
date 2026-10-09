@@ -10,23 +10,23 @@ repository.workspace = true
 
 [dependencies]
 sublayer-core.workspace = true
+sublayer-whisper.workspace = true
 hound.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
-whisper-rs = "0.16"
 
 [dev-dependencies]
 tempfile.workspace = true
 
 [features]
 default = []
-# Compiles whisper.cpp with the Vulkan backend; requires the Vulkan SDK
-# (headers + glslc/glslangValidator + cmake) at build time. Without it,
-# whisper-rs runs on CPU even when `TranscriberConfig::use_gpu` is set.
-vulkan = ["whisper-rs/vulkan"]
+# Compiles whisper.cpp's Vulkan backend through sublayer-whisper; requires the
+# Vulkan SDK (headers + glslc/glslangValidator + cmake) at build time. Without
+# it, whisper-runs on CPU even when `TranscriberConfig::use_gpu` is set.
+vulkan = ["sublayer-whisper/vulkan"]
 
 [lints]
 workspace = true

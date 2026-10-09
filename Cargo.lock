@@ -1408,11 +1408,11 @@ dependencies = [
  "reqwest",
  "sha2",
  "sublayer-core",
+ "sublayer-whisper",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "whisper-rs",
 ]
 
 [[package]]
@@ -1441,6 +1441,16 @@ dependencies = [
  "tokio",
  "tracing",
  "which",
+]
+
+[[package]]
+name = "sublayer-whisper"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "whisper-rs-sys",
 ]
 
 [[package]]
@@ -1871,16 +1881,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bae2f2b2b816647a1cab1acc91f5bd20812d53cb344382635ec2181940c8034f"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "whisper-rs"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2088172d00f936c348d6a72f488dc2660ab3f507263a195df308a3c2383229f6"
-dependencies = [
- "libc",
- "whisper-rs-sys",
 ]
 
 [[package]]

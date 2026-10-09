@@ -2,9 +2,9 @@
 //! reporting.
 //!
 //! Word timing uses whisper.cpp's built-in word alignment
-//! (`token_timestamps` + `split_on_word`). whisper-rs 0.16 does not yet expose
-//! whisper.cpp's dedicated DTW model loader, so full DTW is deferred until
-//! whisper-rs wires it through `WhisperContextParameters::dtw_parameters`.
+//! (`token_timestamps` + `split_on_word`); whisper.cpp 1.8 (as vendored by
+//! `whisper-rs-sys`) no longer ships the experimental DTW model loader, so
+//! full DTW is not available at this whisper.cpp revision.
 //!
 //! Inference is blocking C code and runs on `tokio::task::spawn_blocking`; the
 //! returned future cannot be cancelled mid-window (whisper.cpp finishes the
@@ -12,21 +12,18 @@
 //!
 //! # Progress channel semantics
 //!
-//! whisper-rs intentionally leaks callback closures (its safe-callback
-//! trampolines are never freed), so the `Sender` clones captured by the
-//! progress callback outlive the transcription and [`tokio::sync::mpsc`]
-//! channels never observe "all senders dropped". Callers must therefore treat
-//! a progress value of `1.0` (an explicit final tick, always sent) or the
-//! completion of the `transcribe_audio` future as the end of the stream.
+//! Callbacks handed to [`sublayer_whisper::FullParams`] are plain borrows, so
+//! the `Sender` clone inside the progress callback is dropped as soon as
+//! transcription returns and the channel closes normally. An explicit final
+//! tick of `1.0` is still sent as a completion marker for callers that batch
+//! updates and do not want to distinguish close from completion.
 
 use std::path::Path;
 
 use hound::{SampleFormat, WavReader};
 use sublayer_core::WordToken;
+use sublayer_whisper::{ContextParams, FullParams, SamplingStrategy, WhisperContext, WhisperState};
 use tokio::sync::mpsc::Sender;
-use whisper_rs::{
-    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
-};
 
 use crate::AiError;
 use crate::vad::{VadConfig, detect_speech};
@@ -44,7 +41,7 @@ pub struct TranscriberConfig {
     pub language: Option<String>,
     /// Run the energy VAD first and transcribe speech windows only.
     pub enable_vad: bool,
-    /// Request the GPU backend; falls back to CPU when whisper-rs was built
+    /// Request the GPU backend; falls back to CPU when whisper.cpp was built
     /// without the `vulkan` feature or no GPU backend exists.
     pub use_gpu: bool,
     /// Worker threads for whisper.cpp.
@@ -67,9 +64,9 @@ impl Default for TranscriberConfig {
 
 /// Transcribes `wav_path` (16 kHz mono 16-bit PCM) into word tokens.
 ///
-/// Progress in `0.0..=1.0` is pushed to `progress_tx`; the channel stays open
-/// until transcription completes, when `1.0` is sent. Dropping the receiver
-/// simply stops progress updates.
+/// Progress in `0.0..=1.0` is pushed to `progress_tx`; the channel closes when
+/// transcription completes and a final `1.0` marker is sent. Dropping the
+/// receiver simply stops progress updates.
 pub async fn transcribe_audio(
     wav_path: &Path,
     config: &TranscriberConfig,
@@ -90,9 +87,9 @@ fn transcribe_blocking(
 ) -> Result<Vec<WordToken>, AiError> {
     let samples = read_16k_mono_wav(wav_path)?;
 
-    let mut context_parameters = WhisperContextParameters::default();
-    context_parameters.use_gpu(config.use_gpu);
-    let context = WhisperContext::new_with_params(&config.model_path, context_parameters)?;
+    let mut context_params = ContextParams::default();
+    context_params.use_gpu(config.use_gpu);
+    let context = WhisperContext::new_with_params(&config.model_path, context_params)?;
 
     let mut words = Vec::new();
     if config.enable_vad {
@@ -108,24 +105,28 @@ fn transcribe_blocking(
             let mut params = make_params(config);
             let sender = progress_tx.clone();
             let window_index = index as f32;
-            params.set_progress_callback_safe(move |percent| {
-                let progress = (window_index + percent as f32 / 100.0) / window_count;
-                let _ = sender.try_send(progress);
-            });
+            let mut progress = move |percent: i32| {
+                let value = (window_index + percent as f32 / 100.0) / window_count;
+                let _ = sender.try_send(value);
+            };
+            params.set_progress_callback(&mut progress);
 
             let mut state = context.create_state()?;
-            state.full(params, &samples[start..end])?;
+            state.full(&mut params, &samples[start..end])?;
+            // `params` (and with it the progress callback) is dropped here, so
+            // the sender clone dies and the channel closes.
             append_words(&state, &mut words, segment.start_ms);
         }
     } else {
         let mut params = make_params(config);
         let sender = progress_tx.clone();
-        params.set_progress_callback_safe(move |percent| {
+        let mut progress = move |percent: i32| {
             let _ = sender.try_send(percent as f32 / 100.0);
-        });
+        };
+        params.set_progress_callback(&mut progress);
 
         let mut state = context.create_state()?;
-        state.full(params, &samples)?;
+        state.full(&mut params, &samples)?;
         append_words(&state, &mut words, 0);
     }
 
@@ -134,11 +135,11 @@ fn transcribe_blocking(
 }
 
 /// Builds the decoding parameters shared by every window.
-fn make_params(config: &TranscriberConfig) -> FullParams<'_, '_> {
+fn make_params<'a>(config: &TranscriberConfig) -> FullParams<'a> {
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    params.set_n_threads(config.threads as i32);
+    params.set_n_threads(config.threads.clamp(1, 64) as i32);
     params.set_language(config.language.as_deref());
-    // Word-level timestamps via whisper.cpp's experimental token alignment.
+    // Word-level timestamps via whisper.cpp's token alignment.
     params.set_token_timestamps(true);
     params.set_split_on_word(true);
     params.set_print_progress(false);
@@ -149,18 +150,22 @@ fn make_params(config: &TranscriberConfig) -> FullParams<'_, '_> {
     params
 }
 
+/// Segments whose no-speech probability is above this are dropped: whisper.cpp
+/// assigns a high no-speech score to silence and music windows it decoded, and
+/// their text is usually hallucinated. (`whisper_full_params.no_speech_thold`
+/// itself is not implemented in whisper.cpp, so the filtering happens here.)
+const NO_SPEECH_FILTER_THRESHOLD: f32 = 0.9;
+
 /// Collects the window's tokens into `words`, shifting timestamps by
 /// `offset_ms` (the window's position in the source audio).
-fn append_words(state: &WhisperState, words: &mut Vec<WordToken>, offset_ms: u64) {
-    let tokens: Vec<(String, i64, i64)> = (0..state.full_n_segments())
-        .filter_map(|segment_index| state.get_segment(segment_index))
+fn append_words(state: &WhisperState<'_>, words: &mut Vec<WordToken>, offset_ms: u64) {
+    let tokens: Vec<(String, i64, i64)> = state
+        .segments()
+        .filter(|segment| segment.no_speech_probability() <= NO_SPEECH_FILTER_THRESHOLD)
         .flat_map(|segment| {
-            (0..segment.n_tokens()).filter_map(move |token_index| {
-                let token = segment.get_token(token_index)?;
-                let text = token.to_str_lossy().map(Into::into).unwrap_or_default();
-                let data = token.token_data();
-                Some((text, data.t0, data.t1))
-            })
+            segment
+                .tokens()
+                .map(|token| (token.text_lossy(), token.t0(), token.t1()))
         })
         .collect();
 
@@ -437,7 +442,8 @@ mod tests {
     /// ```
     ///
     /// `SUBLAYER_TEST_AUDIO` is optional; a synthetic tone is used when absent,
-    /// which only proves the pipeline completes.
+    /// which only proves the pipeline completes. `SUBLAYER_TEST_VAD=0` skips
+    /// the voice activity windows and transcribes the whole clip at once.
     #[ignore]
     #[tokio::test]
     async fn transcribe_end_to_end_with_model() {
@@ -476,9 +482,9 @@ mod tests {
         };
 
         let mut last_progress = 0.0_f32;
-        // The channel never closes: whisper-rs leaks the callback closures that
-        // hold sender clones (see the module docs). The final `1.0` tick is the
-        // end-of-stream marker.
+        // The channel closes on its own once transcription returns (callbacks
+        // are borrowed, not leaked); the `1.0` marker just makes the loop end
+        // deterministically before awaiting the task.
         while let Some(progress) = rx.recv().await {
             last_progress = progress.max(last_progress);
             if progress >= 1.0 {

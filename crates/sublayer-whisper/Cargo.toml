@@ -1,0 +1,36 @@
+[package]
+name = "sublayer-whisper"
+description = "Leak-free safe bindings to whisper.cpp via whisper-rs-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Raw bindgen FFI over whisper.cpp. Keep the newest version available:
+# patch releases are additive, minor bumps may shift bindings and require
+# re-running the workspace tests (`cargo update -p whisper-rs-sys`).
+whisper-rs-sys = "0.15"
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[features]
+default = []
+# Compiles whisper.cpp with the Vulkan backend; requires the Vulkan SDK at
+# build time. Without it, `ContextParams::use_gpu` falls back to CPU.
+vulkan = ["whisper-rs-sys/vulkan"]
+
+# This crate is the workspace's single FFI boundary; every `unsafe` block is
+# audited in lib.rs. All other crates inherit the workspace `deny` and contain
+# no allows, which effectively bans unsafe everywhere else.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
