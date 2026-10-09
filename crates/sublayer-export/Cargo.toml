@@ -17,5 +17,11 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+[features]
+# Mesa's `h264_vulkan` driver path can crash GPU drivers whose Vulkan video
+# extension is unstable, so the Vulkan encode backend is opt-in.
+default = []
+encode_vulkan = []
+
 [lints]
 workspace = true

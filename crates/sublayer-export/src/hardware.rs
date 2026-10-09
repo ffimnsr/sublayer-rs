@@ -24,6 +24,11 @@ pub enum HardwareEncoder {
     Vaapi,
     /// NVIDIA hardware encoding through NVENC (`h264_nvenc`).
     Nvenc,
+    /// Mesa hardware encoding through the Vulkan video extension
+    /// (`h264_vulkan`); built only with the `encode_vulkan` feature, since
+    /// unstable drivers have been observed to reset the GPU on encode.
+    #[cfg(feature = "encode_vulkan")]
+    Vulkan,
     /// Software encoding through `libx264`.
     #[default]
     Cpu,
@@ -35,6 +40,8 @@ impl HardwareEncoder {
         match self {
             Self::Vaapi => "VA-API",
             Self::Nvenc => "NVENC",
+            #[cfg(feature = "encode_vulkan")]
+            Self::Vulkan => "Vulkan",
             Self::Cpu => "CPU (libx264)",
         }
     }
@@ -44,16 +51,21 @@ impl HardwareEncoder {
         match self {
             Self::Vaapi => "h264_vaapi",
             Self::Nvenc => "h264_nvenc",
+            #[cfg(feature = "encode_vulkan")]
+            Self::Vulkan => "h264_vulkan",
             Self::Cpu => "libx264",
         }
     }
 
-    /// Parses an encoder name (`vaapi`, `va-api`, `nvenc`, `cpu`, `x264`, or
-    /// any of the FFmpeg encoder names).
+    /// Parses an encoder name (`vaapi`, `va-api`, `nvenc`, `vulkan`, `cpu`,
+    /// `x264`, or any of the FFmpeg encoder names). `vulkan` resolves only
+    /// when built with the `encode_vulkan` feature.
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "vaapi" | "va-api" | "va" | "h264_vaapi" => Some(Self::Vaapi),
             "nvenc" | "nvidia" | "h264_nvenc" => Some(Self::Nvenc),
+            #[cfg(feature = "encode_vulkan")]
+            "vulkan" | "h264_vulkan" => Some(Self::Vulkan),
             "cpu" | "x264" | "libx264" => Some(Self::Cpu),
             _ => None,
         }
@@ -63,7 +75,8 @@ impl HardwareEncoder {
 /// Encoder choice requested by the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EncoderPreference {
-    /// Pick the best available backend (VA-API, then NVENC, then CPU).
+    /// Pick the best available backend (VA-API, then NVENC, then CPU; plus
+    /// Vulkan when built with the `encode_vulkan` feature).
     #[default]
     Auto,
     /// Force a specific backend; failing when it is unavailable.
@@ -105,6 +118,13 @@ pub struct HardwareProbe {
     pub vaapi: bool,
     /// Whether NVENC can be used (NVIDIA node plus `h264_nvenc`).
     pub nvenc: bool,
+    /// Whether Mesa Vulkan video encoding can be used (render node plus
+    /// `h264_vulkan`), only compiled with `encode_vulkan`. RADV needs a DRM
+    /// node like VA-API does, and the render-node condition conveniently
+    /// scopes this to Mesa platforms: NVIDIA GPUs (no render node) keep
+    /// NVENC as their only probe.
+    #[cfg(feature = "encode_vulkan")]
+    pub vulkan: bool,
     /// VA-API render node a render should upload to, when present.
     pub vaapi_device: Option<PathBuf>,
 }
@@ -112,10 +132,11 @@ pub struct HardwareProbe {
 impl HardwareProbe {
     /// Picks the encoder for `preference`.
     ///
-    /// Auto-detection falls back down the chain VA-API → NVENC → CPU; an
-    /// explicit choice that is unavailable is reported instead of being
-    /// silently downgraded. Runtime failures of a probed encoder are handled
-    /// by [`HardwareProbe::chain`] plus [`crate::ExportOptions::fallbacks`].
+    /// Auto-detection falls back down the chain VA-API → NVENC → CPU (plus
+    /// Vulkan in `encode_vulkan` builds); an explicit choice that is
+    /// unavailable is reported instead of being silently downgraded. Runtime
+    /// failures of a probed encoder are handled by [`HardwareProbe::chain`]
+    /// plus [`crate::ExportOptions::fallbacks`].
     pub fn select(&self, preference: EncoderPreference) -> Result<HardwareEncoder, ExportError> {
         self.chain(preference)?
             .into_iter()
@@ -144,6 +165,10 @@ impl HardwareProbe {
                 if self.nvenc {
                     chain.push(HardwareEncoder::Nvenc);
                 }
+                #[cfg(feature = "encode_vulkan")]
+                if self.vulkan {
+                    chain.push(HardwareEncoder::Vulkan);
+                }
                 chain.push(HardwareEncoder::Cpu);
                 Ok(chain)
             }
@@ -153,12 +178,16 @@ impl HardwareProbe {
             EncoderPreference::Explicit(HardwareEncoder::Nvenc) if !self.nvenc => {
                 Err(ExportError::EncoderUnavailable("nvenc"))
             }
+            #[cfg(feature = "encode_vulkan")]
+            EncoderPreference::Explicit(HardwareEncoder::Vulkan) if !self.vulkan => {
+                Err(ExportError::EncoderUnavailable("vulkan"))
+            }
             EncoderPreference::Explicit(encoder) => Ok(vec![encoder]),
         }
     }
 }
 
-/// Probes the local machine for VA-API and NVENC support.
+/// Probes the local machine for VA-API, NVENC, and Vulkan support.
 ///
 /// The FFmpeg encoder list is fetched once; any failure to run FFmpeg is
 /// reported, since a render could not start either.
@@ -180,9 +209,13 @@ fn probe_from(
 ) -> HardwareProbe {
     let has_encoder = |name: &str| encoder_list.split_whitespace().any(|token| token == name);
     let vaapi = render_node.is_some() && has_encoder("h264_vaapi");
+    #[cfg(feature = "encode_vulkan")]
+    let vulkan = render_node.is_some() && has_encoder("h264_vulkan");
     HardwareProbe {
         vaapi,
         nvenc: nvidia_device && has_encoder("h264_nvenc"),
+        #[cfg(feature = "encode_vulkan")]
+        vulkan,
         vaapi_device: if vaapi {
             render_node.map(Path::to_path_buf)
         } else {
@@ -228,15 +261,19 @@ fn nvidia_device_present() -> bool {
 mod tests {
     use super::*;
 
-    const ENCODER_LIST: &str = "Encoders:\n V..... h264_vaapi  VAAPI H.264\n V..... h264_nvenc  NVIDIA NVENC H.264\n V..... libx264     libx264 H.264\n";
+    const ENCODER_LIST: &str = "Encoders:\n V..... h264_vaapi   VAAPI H.264\n V..... h264_nvenc   NVIDIA NVENC H.264\n V..... h264_vulkan  Vulkan H.264\n V..... libx264      libx264 H.264\n";
 
     #[test]
     fn encoder_names_round_trip_through_parse() {
-        for encoder in [
+        #[allow(unused_mut)]
+        let mut encoders = vec![
             HardwareEncoder::Vaapi,
             HardwareEncoder::Nvenc,
             HardwareEncoder::Cpu,
-        ] {
+        ];
+        #[cfg(feature = "encode_vulkan")]
+        encoders.push(HardwareEncoder::Vulkan);
+        for encoder in encoders {
             assert_eq!(
                 HardwareEncoder::parse(encoder.encoder_name()),
                 Some(encoder)
@@ -246,6 +283,17 @@ mod tests {
             HardwareEncoder::parse("VA-API"),
             Some(HardwareEncoder::Vaapi)
         );
+        #[cfg(feature = "encode_vulkan")]
+        {
+            assert_eq!(
+                HardwareEncoder::parse("vulkan"),
+                Some(HardwareEncoder::Vulkan)
+            );
+            assert_eq!(
+                HardwareEncoder::parse("h264_vulkan"),
+                Some(HardwareEncoder::Vulkan)
+            );
+        }
         assert_eq!(HardwareEncoder::parse("x264"), Some(HardwareEncoder::Cpu));
         assert_eq!(HardwareEncoder::parse("av1"), None);
         assert_eq!(
@@ -258,23 +306,40 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "encode_vulkan"))]
+    #[test]
+    fn vulkan_is_not_parsed_without_the_feature() {
+        assert_eq!(HardwareEncoder::parse("vulkan"), None);
+        assert_eq!(HardwareEncoder::parse("h264_vulkan"), None);
+    }
+
     #[test]
     fn probe_requires_both_device_and_encoder() {
         let node = Path::new("/dev/dri/renderD128");
         let both = probe_from(ENCODER_LIST, Some(node), true);
         assert!(both.vaapi && both.nvenc);
+        #[cfg(feature = "encode_vulkan")]
+        assert!(both.vulkan);
 
-        // No render node: VA-API is out even though FFmpeg supports it.
+        // No render node: VA-API (and Vulkan, when compiled in) are out even
+        // though FFmpeg supports them (Mesa drivers need a DRM node); NVENC
+        // stays.
         let no_node = probe_from(ENCODER_LIST, None, true);
         assert!(!no_node.vaapi && no_node.nvenc);
+        #[cfg(feature = "encode_vulkan")]
+        assert!(!no_node.vulkan);
 
         // Old FFmpeg build without the encoders.
         let no_encoders = probe_from("Encoders:\n V..... libx264 H.264\n", Some(node), true);
         assert!(!no_encoders.vaapi && !no_encoders.nvenc);
+        #[cfg(feature = "encode_vulkan")]
+        assert!(!no_encoders.vulkan);
 
         // No NVIDIA device.
         let no_nvidia = probe_from(ENCODER_LIST, Some(node), false);
         assert!(no_nvidia.vaapi && !no_nvidia.nvenc);
+        #[cfg(feature = "encode_vulkan")]
+        assert!(no_nvidia.vulkan);
     }
 
     #[test]
@@ -297,6 +362,8 @@ mod tests {
         let vaapi_only = HardwareProbe {
             vaapi: true,
             nvenc: false,
+            #[cfg(feature = "encode_vulkan")]
+            vulkan: false,
             vaapi_device: Some(PathBuf::from("/dev/dri/renderD128")),
         };
         assert_eq!(
@@ -311,12 +378,38 @@ mod tests {
         let nvenc_only = HardwareProbe {
             vaapi: false,
             nvenc: true,
+            #[cfg(feature = "encode_vulkan")]
+            vulkan: false,
             vaapi_device: None,
         };
         assert_eq!(
             nvenc_only.select(EncoderPreference::Auto).unwrap(),
             HardwareEncoder::Nvenc
         );
+
+        // Vulkan is the rescue when VA-API is missing entirely.
+        #[cfg(feature = "encode_vulkan")]
+        {
+            let vulkan_only = HardwareProbe {
+                vaapi: false,
+                nvenc: false,
+                vulkan: true,
+                vaapi_device: None,
+            };
+            assert_eq!(
+                vulkan_only.select(EncoderPreference::Auto).unwrap(),
+                HardwareEncoder::Vulkan
+            );
+            assert!(matches!(
+                vulkan_only.select(EncoderPreference::Explicit(HardwareEncoder::Vaapi)),
+                Err(ExportError::EncoderUnavailable("vaapi"))
+            ));
+            assert!(matches!(
+                HardwareProbe::default()
+                    .select(EncoderPreference::Explicit(HardwareEncoder::Vulkan)),
+                Err(ExportError::EncoderUnavailable("vulkan"))
+            ));
+        }
     }
 
     #[test]
@@ -324,16 +417,15 @@ mod tests {
         let all = HardwareProbe {
             vaapi: true,
             nvenc: true,
+            #[cfg(feature = "encode_vulkan")]
+            vulkan: true,
             vaapi_device: Some(PathBuf::from("/dev/dri/renderD128")),
         };
-        assert_eq!(
-            all.chain(EncoderPreference::Auto).unwrap(),
-            vec![
-                HardwareEncoder::Vaapi,
-                HardwareEncoder::Nvenc,
-                HardwareEncoder::Cpu
-            ]
-        );
+        let mut expected = vec![HardwareEncoder::Vaapi, HardwareEncoder::Nvenc];
+        #[cfg(feature = "encode_vulkan")]
+        expected.push(HardwareEncoder::Vulkan);
+        expected.push(HardwareEncoder::Cpu);
+        assert_eq!(all.chain(EncoderPreference::Auto).unwrap(), expected);
         // Explicit choices never carry fallbacks: the user asked for one backend.
         assert_eq!(
             all.chain(EncoderPreference::Explicit(HardwareEncoder::Nvenc))
@@ -344,12 +436,28 @@ mod tests {
         let nvenc_only = HardwareProbe {
             vaapi: false,
             nvenc: true,
+            #[cfg(feature = "encode_vulkan")]
+            vulkan: false,
             vaapi_device: None,
         };
         assert_eq!(
             nvenc_only.chain(EncoderPreference::Auto).unwrap(),
             vec![HardwareEncoder::Nvenc, HardwareEncoder::Cpu]
         );
+
+        #[cfg(feature = "encode_vulkan")]
+        {
+            let vulkan_only = HardwareProbe {
+                vaapi: false,
+                nvenc: false,
+                vulkan: true,
+                vaapi_device: None,
+            };
+            assert_eq!(
+                vulkan_only.chain(EncoderPreference::Auto).unwrap(),
+                vec![HardwareEncoder::Vulkan, HardwareEncoder::Cpu]
+            );
+        }
 
         let none = HardwareProbe::default();
         assert_eq!(
@@ -359,6 +467,11 @@ mod tests {
         assert!(matches!(
             none.chain(EncoderPreference::Explicit(HardwareEncoder::Nvenc)),
             Err(ExportError::EncoderUnavailable("nvenc"))
+        ));
+        #[cfg(feature = "encode_vulkan")]
+        assert!(matches!(
+            none.chain(EncoderPreference::Explicit(HardwareEncoder::Vulkan)),
+            Err(ExportError::EncoderUnavailable("vulkan"))
         ));
     }
 

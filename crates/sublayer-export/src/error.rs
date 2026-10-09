@@ -21,7 +21,9 @@ pub enum ExportError {
     EncoderUnavailable(&'static str),
 
     /// `SUBLAYER_ENCODER` holds a value that names no encoder.
-    #[error("unknown encoder `{0}` (expected auto, vaapi, nvenc, or cpu)")]
+    #[error(
+        "unknown encoder `{0}` (expected auto, vaapi, nvenc, or cpu; vulkan requires the `encode_vulkan` feature)"
+    )]
     UnknownEncoder(String),
 
     /// The progress receiver was dropped, so the render was stopped.

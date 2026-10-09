@@ -129,6 +129,8 @@ fn encoder_label_reflects_the_probe() {
         sublayer_export::HardwareProbe {
             vaapi: true,
             nvenc: false,
+            #[cfg(feature = "encode_vulkan")]
+            vulkan: false,
             vaapi_device: Some(PathBuf::from("/dev/dri/renderD128")),
         },
         sublayer_export::HardwareEncoder::Vaapi,

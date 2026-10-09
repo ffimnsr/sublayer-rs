@@ -151,6 +151,11 @@ async fn render_once(
             .unwrap_or_else(|| PathBuf::from("/dev/dri/renderD128"));
         command.arg("-vaapi_device").arg(device);
     }
+    #[cfg(feature = "encode_vulkan")]
+    if encoder == HardwareEncoder::Vulkan {
+        // Pick the first Vulkan ICD; the `hwupload` below uses this device.
+        command.args(["-init_hw_device", "vulkan=vk:0"]);
+    }
     command
         .arg("-i")
         .arg(input_video)
@@ -251,8 +256,11 @@ fn filter_chain(ass_path: &Path, fonts_dir: &Path, encoder: HardwareEncoder) -> 
         escape_filter_path(fonts_dir)
     );
     match encoder {
-        // VA-API uploads NV12 surfaces to the GPU before encoding.
+        // VA-API (and Vulkan, when compiled in) upload NV12 surfaces to the
+        // GPU before encoding.
         HardwareEncoder::Vaapi => chain.push_str(",format=nv12,hwupload"),
+        #[cfg(feature = "encode_vulkan")]
+        HardwareEncoder::Vulkan => chain.push_str(",format=nv12,hwupload"),
         HardwareEncoder::Nvenc | HardwareEncoder::Cpu => chain.push_str(",format=yuv420p"),
     }
     chain
@@ -296,6 +304,13 @@ fn encoder_args(options: &ExportOptions, encoder: HardwareEncoder) -> Vec<String
             "-preset".to_owned(),
             "p5".to_owned(),
             "-cq".to_owned(),
+            quality,
+        ],
+        #[cfg(feature = "encode_vulkan")]
+        HardwareEncoder::Vulkan => vec![
+            "-c:v".to_owned(),
+            "h264_vulkan".to_owned(),
+            "-qp".to_owned(),
             quality,
         ],
         HardwareEncoder::Cpu => vec![
@@ -369,6 +384,15 @@ mod tests {
             HardwareEncoder::Vaapi,
         );
         assert!(chain.ends_with(",format=nv12,hwupload"), "{chain}");
+        #[cfg(feature = "encode_vulkan")]
+        {
+            let chain = filter_chain(
+                Path::new("/tmp/subs.ass"),
+                Path::new("/tmp/fonts"),
+                HardwareEncoder::Vulkan,
+            );
+            assert!(chain.ends_with(",format=nv12,hwupload"), "{chain}");
+        }
         let chain = filter_chain(
             Path::new("/tmp/subs.ass"),
             Path::new("/tmp/fonts"),
@@ -391,11 +415,15 @@ mod tests {
 
     #[test]
     fn encoder_args_use_quality_for_each_backend() {
-        for (encoder, expected_flag) in [
+        #[allow(unused_mut)]
+        let mut backends = vec![
             (HardwareEncoder::Cpu, "-crf"),
             (HardwareEncoder::Nvenc, "-cq"),
             (HardwareEncoder::Vaapi, "-qp"),
-        ] {
+        ];
+        #[cfg(feature = "encode_vulkan")]
+        backends.push((HardwareEncoder::Vulkan, "-qp"));
+        for (encoder, expected_flag) in backends {
             let options = ExportOptions {
                 encoder,
                 quality: 18,

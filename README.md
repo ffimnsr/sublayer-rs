@@ -37,8 +37,9 @@ video ──▶ ffprobe ──▶ 16 kHz audio ──▶ Whisper (VAD + word tim
 - **Slint desktop studio**: decoded frame preview with a live caption overlay,
   an interactive waveform timeline with draggable/trimmable caption cards,
   and a style inspector that edits the theme as you type.
-- **Hardware-accelerated export**: probes VA-API, then NVENC, then falls back
-  to `libx264`, retrying at runtime when a probed encoder cannot start;
+- **Hardware-accelerated export**: probes VA-API, then NVENC, then falls
+  back to `libx264`, retrying at runtime when a probed encoder cannot start
+  (a Vulkan backend is compiled in only with the `encode_vulkan` feature);
   streams percentage, fps, and ETA while rendering.
 - **Headless CLI** for batch and CI workloads: `probe`, `transcribe`, `render`.
 - **Packaging**: Flatpak manifest (`--device=dri`, Wayland & PipeWire sockets)
@@ -122,11 +123,13 @@ sublayer render input.mp4 -o out.mp4 --subtitles subs.ass --encoder cpu --qualit
 ```
 
 Render flags: `--subtitles <file.ass>` skips transcription, `--encoder
-auto|vaapi|nvenc|cpu` forces a backend, `--quality 0–51` sets `-crf` (x264),
-`-cq` (NVENC), or `-qp` (VA-API). Progress (percentage, fps, ETA) is painted
-on stderr, so output can be piped safely. With `auto`, a backend that fails
-at startup is retried down the chain and the CLI prints the fallback. Cards
-wider than the frame are scaled down automatically to fit the video width.
+auto|vaapi|nvenc|cpu` forces a backend (`vulkan` additionally, in
+the `encode_vulkan` feature build), `--quality 0–51` sets `-crf`
+(x264), `-cq` (NVENC), or `-qp` (VA-API/Vulkan). Progress (percentage, fps,
+ETA) is painted on stderr, so output can be piped safely. With `auto`, a
+backend that fails at startup is retried down the chain and the CLI prints
+the fallback. Cards wider than the frame are scaled down automatically to
+fit the video width.
 
 ## Hardware acceleration
 
@@ -135,10 +138,20 @@ wider than the frame are scaled down automatically to fit the video width.
   uploaded with `hwupload`.
 - **NVENC** (NVIDIA) is used when an NVIDIA device node is present *and*
   `h264_nvenc` is available.
+- **Vulkan** is the Mesa video-encode path (`h264_vulkan`, RADV) and is
+  **opt-in**: unstable drivers have been observed to reset the GPU on
+  encode, so default builds compile it out. Build with
+  `--features encode_vulkan` (`cargo build --release -p sublayer-cli
+  --features encode_vulkan`) to enable it. When compiled in, it is probed
+  like VA-API (render node plus encoder listed) and sits after NVENC in the
+  chain: a machine whose VA-API driver is broken or missing but whose Vulkan
+  video driver works still renders on the GPU. NVIDIA systems have no render
+  node, so they never pick Vulkan over NVENC.
 - Otherwise the render falls back to `libx264` (`-preset medium`).
 - An `auto` render keeps the whole chain: when a probed encoder fails to
   start (a driver may list `h264_vaapi` yet expose no usable encode
-  profile), the render retries the next backend and finishes on `libx264`.
+  profile), the render retries the next backend and finishes on the first
+  one that starts, last resort `libx264`.
 - An explicit `--encoder` (or `SUBLAYER_ENCODER`) pins one backend: an
   unavailable or failing one is reported rather than silently downgraded.
 
@@ -151,7 +164,7 @@ and requires the Vulkan-enabled build.
 | --- | --- |
 | `SUBLAYER_FFMPEG` / `SUBLAYER_FFPROBE` | Explicit executables, useful inside Flatpak or custom installs |
 | `SUBLAYER_FONTS_DIR` | Font directory handed to libass (`fontsdir=`) |
-| `SUBLAYER_ENCODER` | Encoder preference: `auto`, `vaapi`, `nvenc`, `cpu` |
+| `SUBLAYER_ENCODER` | Encoder preference: `auto`, `vaapi`, `nvenc`, `cpu` (`vulkan` with the `encode_vulkan` feature) |
 | `RUST_LOG` | Log filter for diagnostics (stderr); whisper.cpp/ggml output is routed here as the `whisper` target, e.g. `RUST_LOG=sublayer_media=debug,whisper=debug` |
 | `SLINT_BACKEND` | Force a Slint backend, e.g. `winit-software` without GL drivers |
 
@@ -172,7 +185,7 @@ flow; the UI and CLI are thin shells over the engine crates.
 | `sublayer-ai` | Model downloader with SHA-256 verification, VAD, Whisper transcription with word timestamps |
 | `sublayer-whisper` | Leak-free safe bindings to whisper.cpp over the raw `whisper-rs-sys` FFI; the only crate allowed `unsafe` |
 | `sublayer-subtitles` | Word clustering, ASS/SRT/VTT compilation, theme presets and JSON I/O, font directory resolution |
-| `sublayer-export` | VA-API/NVENC/CPU probing, FFmpeg burn-in runner, progress and ETA stream |
+| `sublayer-export` | VA-API/NVENC/Vulkan/CPU probing, FFmpeg burn-in runner, progress and ETA stream |
 | `sublayer-ui` | Slint desktop studio (window, timeline, inspector, bridge to Tokio) |
 | `sublayer-cli` | `sublayer` binary: probe, transcribe, render |
 
@@ -246,9 +259,9 @@ Testing strategy:
   filter separators (`:`, `'`, spaces).
 - `sublayer-ui` drives the Slint tree on the testing backend: it checks the
   property projection, retimes a caption card by dispatching real pointer
-  events with mock time, and runs without Wayland/X11. VA-API and NVENC paths
-  need a GPU host to be exercised end to end; they are probe- and
-  argument-tested on CPU-only machines.
+  events with mock time, and runs without Wayland/X11. VA-API, NVENC, and
+  Vulkan paths need a GPU host to be exercised end to end; they are probe-
+  and argument-tested on CPU-only machines.
 - Whisper end-to-end tests are `#[ignore]`d because they need a downloaded
   model; run them with `SUBLAYER_TEST_MODEL=/path/to/ggml-base.en.bin cargo
   test -- --ignored`.

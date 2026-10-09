@@ -92,7 +92,8 @@ enum Command {
         /// Pre-compiled ASS file; skips transcription entirely.
         #[arg(short, long)]
         subtitles: Option<PathBuf>,
-        /// Video encoder: `auto` (VA-API, then NVENC, then CPU) or an explicit
+        /// Video encoder: `auto` (VA-API, then NVENC, then CPU; Vulkan too
+        /// when built with the `encode_vulkan` feature) or an explicit
         /// backend. `SUBLAYER_ENCODER` is consulted when the flag is omitted.
         #[arg(long)]
         encoder: Option<String>,

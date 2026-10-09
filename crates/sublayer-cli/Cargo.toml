@@ -26,5 +26,10 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 
+[features]
+# Forward the opt-in Vulkan encode backend; see sublayer-export.
+default = []
+encode_vulkan = ["sublayer-export/encode_vulkan"]
+
 [lints]
 workspace = true

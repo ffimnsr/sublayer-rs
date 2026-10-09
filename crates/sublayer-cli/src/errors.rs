@@ -55,7 +55,9 @@ pub enum CliError {
     UnsupportedOutput(String),
 
     /// The `--encoder` argument names no known encoder.
-    #[error("unknown encoder `{0}` (expected auto, vaapi, nvenc, or cpu)")]
+    #[error(
+        "unknown encoder `{0}` (expected auto, vaapi, nvenc, or cpu; vulkan requires the `encode_vulkan` feature)"
+    )]
     UnknownEncoder(String),
 
     /// The blocking transcription worker panicked.

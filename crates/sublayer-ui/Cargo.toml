@@ -35,5 +35,10 @@ slint-build.workspace = true
 # Headless platform for instantiating the window in tests.
 i-slint-backend-testing = "1.18"
 
+[features]
+# Forward the opt-in Vulkan encode backend; see sublayer-export.
+default = []
+encode_vulkan = ["sublayer-export/encode_vulkan"]
+
 [lints]
 workspace = true

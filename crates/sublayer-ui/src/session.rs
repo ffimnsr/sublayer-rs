@@ -920,6 +920,8 @@ mod tests {
             HardwareProbe {
                 vaapi: false,
                 nvenc: true,
+                #[cfg(feature = "encode_vulkan")]
+                vulkan: false,
                 vaapi_device: None,
             },
             HardwareEncoder::Nvenc,
