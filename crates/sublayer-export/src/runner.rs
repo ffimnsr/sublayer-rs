@@ -32,8 +32,15 @@ pub struct ExportProgress {
 /// Tuning for one render.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExportOptions {
-    /// Encoder to render with; see [`crate::probe_hardware`].
+    /// Encoder to attempt first; see [`crate::probe_hardware`].
     pub encoder: HardwareEncoder,
+    /// Encoders tried, in order, when `encoder` cannot start or fails
+    /// mid-render. Probing sees device nodes and FFmpeg's encoder list, but not
+    /// whether a driver actually offers the encode profile, so an `auto`
+    /// selection supplies the rest of its chain here. Leave empty when the
+    /// user explicitly picked an encoder: that choice must not be silently
+    /// downgraded.
+    pub fallbacks: Vec<HardwareEncoder>,
     /// Source duration in milliseconds, used for percentage and ETA; `0` when
     /// unknown.
     pub duration_ms: u64,
@@ -47,6 +54,7 @@ impl Default for ExportOptions {
     fn default() -> Self {
         Self {
             encoder: HardwareEncoder::Cpu,
+            fallbacks: Vec::new(),
             duration_ms: 0,
             quality: 23,
             vaapi_device: None,
@@ -55,6 +63,11 @@ impl Default for ExportOptions {
 }
 
 /// Renders `input_video` into `output_video`, burning in `ass_path`.
+///
+/// `options.encoder` is tried first and each of `options.fallbacks` after it,
+/// so a hardware encoder that turns out to be unusable at runtime degrades to
+/// the next backend instead of failing the render. Returns the encoder that
+/// produced the output.
 ///
 /// `-progress pipe:1` is parsed line by line and reported on `progress_tx`;
 /// dropping the receiver kills the encoder and returns
@@ -65,6 +78,60 @@ pub async fn run_export(
     ass_path: &Path,
     fonts_dir: &Path,
     options: &ExportOptions,
+    progress_tx: Sender<ExportProgress>,
+) -> Result<HardwareEncoder, ExportError> {
+    let mut encoders = std::iter::once(options.encoder).chain(options.fallbacks.iter().copied());
+    // The chain always starts with `options.encoder`.
+    let mut current = encoders.next().expect("the encoder chain is never empty");
+    loop {
+        match render_once(
+            input_video,
+            output_video,
+            ass_path,
+            fonts_dir,
+            options,
+            current,
+            progress_tx.clone(),
+        )
+        .await
+        {
+            Ok(()) => return Ok(current),
+            // A dropped receiver means the caller is gone; do not keep going.
+            Err(ExportError::Cancelled) => return Err(ExportError::Cancelled),
+            Err(error) => {
+                let Some(next) = encoders.next() else {
+                    return Err(error);
+                };
+                // The receiver may have been dropped while this attempt ran;
+                // starting another FFmpeg just to notice is pointless work.
+                if progress_tx.is_closed() {
+                    return Err(ExportError::Cancelled);
+                }
+                // The full error carries FFmpeg's stderr excerpt; keep the
+                // warning to its first line and leave the rest to `debug`.
+                let summary = error.to_string();
+                let summary = summary.lines().next().unwrap_or_default();
+                tracing::warn!(
+                    failed = current.encoder_name(),
+                    next = next.encoder_name(),
+                    error = summary,
+                    "encoder failed, retrying"
+                );
+                tracing::debug!(%error, "encoder failure details");
+                current = next;
+            }
+        }
+    }
+}
+
+/// One render attempt with a single encoder.
+async fn render_once(
+    input_video: &Path,
+    output_video: &Path,
+    ass_path: &Path,
+    fonts_dir: &Path,
+    options: &ExportOptions,
+    encoder: HardwareEncoder,
     progress_tx: Sender<ExportProgress>,
 ) -> Result<(), ExportError> {
     let program = ffmpeg::resolve(ffmpeg::FFMPEG, ffmpeg::FFMPEG_ENV)?;
@@ -77,7 +144,7 @@ pub async fn run_export(
 
     let mut command = ffmpeg::command(&program);
     command.args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y"]);
-    if options.encoder == HardwareEncoder::Vaapi {
+    if encoder == HardwareEncoder::Vaapi {
         let device = options
             .vaapi_device
             .clone()
@@ -89,8 +156,8 @@ pub async fn run_export(
         .arg(input_video)
         .args(["-map", "0:v:0", "-map", "0:a:0?"])
         .arg("-vf")
-        .arg(filter_chain(ass_path, fonts_dir, options.encoder))
-        .args(encoder_args(options));
+        .arg(filter_chain(ass_path, fonts_dir, encoder))
+        .args(encoder_args(options, encoder));
     command
         .args(["-c:a", "aac", "-b:a", "192k"])
         .args(muxer_args(output_video))
@@ -98,7 +165,7 @@ pub async fn run_export(
         .args(["-progress", "pipe:1", "-nostats"])
         .arg(output_video);
 
-    tracing::debug!(encoder = options.encoder.encoder_name(), "starting render");
+    tracing::debug!(encoder = encoder.encoder_name(), "starting render");
     let mut child = command.spawn().map_err(|source| MediaError::Spawn {
         binary: ffmpeg::FFMPEG,
         source,
@@ -214,9 +281,9 @@ fn escape_filter_path(path: &Path) -> String {
 }
 
 /// Video-codec arguments for the selected backend.
-fn encoder_args(options: &ExportOptions) -> Vec<String> {
+fn encoder_args(options: &ExportOptions, encoder: HardwareEncoder) -> Vec<String> {
     let quality = options.quality.to_string();
-    match options.encoder {
+    match encoder {
         HardwareEncoder::Vaapi => vec![
             "-c:v".to_owned(),
             "h264_vaapi".to_owned(),
@@ -334,7 +401,7 @@ mod tests {
                 quality: 18,
                 ..ExportOptions::default()
             };
-            let args = encoder_args(&options);
+            let args = encoder_args(&options, encoder);
             assert!(args.contains(&expected_flag.to_owned()), "{args:?}");
             assert!(args.contains(&"18".to_owned()), "{args:?}");
             assert!(

@@ -114,23 +114,46 @@ impl HardwareProbe {
     ///
     /// Auto-detection falls back down the chain VA-API → NVENC → CPU; an
     /// explicit choice that is unavailable is reported instead of being
-    /// silently downgraded.
+    /// silently downgraded. Runtime failures of a probed encoder are handled
+    /// by [`HardwareProbe::chain`] plus [`crate::ExportOptions::fallbacks`].
     pub fn select(&self, preference: EncoderPreference) -> Result<HardwareEncoder, ExportError> {
+        self.chain(preference)?
+            .into_iter()
+            .next()
+            .ok_or(ExportError::EncoderUnavailable("cpu"))
+    }
+
+    /// Encoders to attempt for `preference`, best first.
+    ///
+    /// `Auto` yields the whole available chain ending in CPU, so a render can
+    /// retry when a *device* turns out not to support encoding even though the
+    /// FFmpeg build lists the encoder — probing cannot see driver profile
+    /// gaps, and failing there would otherwise abort a render the CPU could
+    /// finish. An explicit choice yields exactly one encoder: `--encoder vaapi`
+    /// never silently renders on the CPU.
+    pub fn chain(
+        &self,
+        preference: EncoderPreference,
+    ) -> Result<Vec<HardwareEncoder>, ExportError> {
         match preference {
-            EncoderPreference::Auto => Ok(if self.vaapi {
-                HardwareEncoder::Vaapi
-            } else if self.nvenc {
-                HardwareEncoder::Nvenc
-            } else {
-                HardwareEncoder::Cpu
-            }),
+            EncoderPreference::Auto => {
+                let mut chain = Vec::new();
+                if self.vaapi {
+                    chain.push(HardwareEncoder::Vaapi);
+                }
+                if self.nvenc {
+                    chain.push(HardwareEncoder::Nvenc);
+                }
+                chain.push(HardwareEncoder::Cpu);
+                Ok(chain)
+            }
             EncoderPreference::Explicit(HardwareEncoder::Vaapi) if !self.vaapi => {
                 Err(ExportError::EncoderUnavailable("vaapi"))
             }
             EncoderPreference::Explicit(HardwareEncoder::Nvenc) if !self.nvenc => {
                 Err(ExportError::EncoderUnavailable("nvenc"))
             }
-            EncoderPreference::Explicit(encoder) => Ok(encoder),
+            EncoderPreference::Explicit(encoder) => Ok(vec![encoder]),
         }
     }
 }
@@ -294,6 +317,49 @@ mod tests {
             nvenc_only.select(EncoderPreference::Auto).unwrap(),
             HardwareEncoder::Nvenc
         );
+    }
+
+    #[test]
+    fn chain_orders_auto_and_pins_explicit_choices() {
+        let all = HardwareProbe {
+            vaapi: true,
+            nvenc: true,
+            vaapi_device: Some(PathBuf::from("/dev/dri/renderD128")),
+        };
+        assert_eq!(
+            all.chain(EncoderPreference::Auto).unwrap(),
+            vec![
+                HardwareEncoder::Vaapi,
+                HardwareEncoder::Nvenc,
+                HardwareEncoder::Cpu
+            ]
+        );
+        // Explicit choices never carry fallbacks: the user asked for one backend.
+        assert_eq!(
+            all.chain(EncoderPreference::Explicit(HardwareEncoder::Nvenc))
+                .unwrap(),
+            vec![HardwareEncoder::Nvenc]
+        );
+
+        let nvenc_only = HardwareProbe {
+            vaapi: false,
+            nvenc: true,
+            vaapi_device: None,
+        };
+        assert_eq!(
+            nvenc_only.chain(EncoderPreference::Auto).unwrap(),
+            vec![HardwareEncoder::Nvenc, HardwareEncoder::Cpu]
+        );
+
+        let none = HardwareProbe::default();
+        assert_eq!(
+            none.chain(EncoderPreference::Auto).unwrap(),
+            vec![HardwareEncoder::Cpu]
+        );
+        assert!(matches!(
+            none.chain(EncoderPreference::Explicit(HardwareEncoder::Nvenc)),
+            Err(ExportError::EncoderUnavailable("nvenc"))
+        ));
     }
 
     #[test]

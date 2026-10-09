@@ -70,14 +70,22 @@ pub enum UiEvent {
     ProjectSaved { path: PathBuf },
     /// A caption file finished writing.
     CaptionsExported { path: PathBuf },
-    /// A rendered video finished writing.
-    VideoExported { path: PathBuf },
+    /// A rendered video finished writing; `encoder` is the backend that
+    /// actually finished it, which differs from the planned one after a
+    /// hardware fallback.
+    VideoExported {
+        path: PathBuf,
+        encoder: HardwareEncoder,
+    },
     /// The hardware probe finished; these drive the next render.
     HardwareProbed {
         /// Full probe result, including the VA-API device.
         probe: HardwareProbe,
         /// Encoder renders will use.
         encoder: HardwareEncoder,
+        /// Encoders tried after `encoder` fails at runtime; only an
+        /// `auto` selection carries fallbacks.
+        fallbacks: Vec<HardwareEncoder>,
     },
     /// Progress of the running video render.
     RenderProgress {
@@ -224,8 +232,22 @@ impl Bridge {
                     HardwareProbe::default()
                 }
             };
-            let encoder = probe.select(preference).unwrap_or(HardwareEncoder::Cpu);
-            emitter.send(UiEvent::HardwareProbed { probe, encoder });
+            let chain = match probe.chain(preference) {
+                Ok(chain) => chain,
+                Err(error) => {
+                    tracing::warn!(%error, "encoder unavailable; rendering will use the CPU");
+                    vec![HardwareEncoder::Cpu]
+                }
+            };
+            let (encoder, fallbacks) = chain
+                .split_first()
+                .map(|(encoder, fallbacks)| (*encoder, fallbacks))
+                .expect("the probe chain always contains at least the CPU");
+            emitter.send(UiEvent::HardwareProbed {
+                probe,
+                encoder,
+                fallbacks: fallbacks.to_vec(),
+            });
         });
     }
 
@@ -253,7 +275,10 @@ impl Bridge {
                 });
             }
             match render.await {
-                Ok(Ok(())) => emitter.send(UiEvent::VideoExported { path: output }),
+                Ok(Ok(encoder)) => emitter.send(UiEvent::VideoExported {
+                    path: output,
+                    encoder,
+                }),
                 Ok(Err(error)) => emitter.fail(&error),
                 Err(error) => emitter.send(UiEvent::Failed {
                     message: format!("render task failed: {error}"),

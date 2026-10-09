@@ -8,10 +8,90 @@ use whisper_rs_sys as sys;
 use crate::error::WhisperError;
 use crate::state::WhisperState;
 
+/// Alignment-head preset used for DTW token-level timestamps.
+///
+/// whisper.cpp 1.8 ships the OpenAI alignment heads for every model size as
+/// compile-time presets, so DTW needs no extra weights: the preset selects
+/// the cross-attention heads that map text tokens onto the audio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignmentHeads {
+    TinyEn,
+    Tiny,
+    BaseEn,
+    Base,
+    SmallEn,
+    Small,
+    MediumEn,
+    Medium,
+    LargeV1,
+    LargeV2,
+    LargeV3,
+    LargeV3Turbo,
+}
+
+impl AlignmentHeads {
+    /// Preset for a model file, inferred from its file name.
+    ///
+    /// Returns `None` for unrecognized names; DTW then stays off and the
+    /// attention-based fallback (`t0`/`t1`) applies.
+    pub fn for_model(path: &Path) -> Option<Self> {
+        let name = path.file_name()?.to_str()?.to_ascii_lowercase();
+        if !name.contains("ggml") || !name.contains(".bin") {
+            return None;
+        }
+        let english = name.contains(".en");
+        let heads = if name.contains("turbo") {
+            Self::LargeV3Turbo
+        } else if name.contains("tiny") {
+            if english { Self::TinyEn } else { Self::Tiny }
+        } else if name.contains("small") {
+            if english { Self::SmallEn } else { Self::Small }
+        } else if name.contains("medium") {
+            if english {
+                Self::MediumEn
+            } else {
+                Self::Medium
+            }
+        } else if name.contains("base") {
+            if english { Self::BaseEn } else { Self::Base }
+        } else if name.contains("large") {
+            if name.contains("v1") {
+                Self::LargeV1
+            } else if name.contains("v3") {
+                Self::LargeV3
+            } else {
+                Self::LargeV2
+            }
+        } else {
+            return None;
+        };
+        Some(heads)
+    }
+
+    fn as_sys(self) -> sys::whisper_alignment_heads_preset {
+        match self {
+            Self::TinyEn => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_TINY_EN,
+            Self::Tiny => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_TINY,
+            Self::BaseEn => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_BASE_EN,
+            Self::Base => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_BASE,
+            Self::SmallEn => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_SMALL_EN,
+            Self::Small => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_SMALL,
+            Self::MediumEn => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_MEDIUM_EN,
+            Self::Medium => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_MEDIUM,
+            Self::LargeV1 => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_LARGE_V1,
+            Self::LargeV2 => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_LARGE_V2,
+            Self::LargeV3 => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_LARGE_V3,
+            Self::LargeV3Turbo => sys::whisper_alignment_heads_preset_WHISPER_AHEADS_LARGE_V3_TURBO,
+        }
+    }
+}
+
 /// `whisper_context_default_params()` plus explicit builder overrides.
 #[derive(Debug, Clone)]
 pub struct ContextParams {
     fp: sys::whisper_context_params,
+    /// DTW alignment preset; `None` keeps the attention-based timestamps.
+    dtw: Option<AlignmentHeads>,
 }
 
 impl Default for ContextParams {
@@ -23,7 +103,7 @@ impl Default for ContextParams {
         // CPU so acceleration is always an explicit opt-in (a missing backend
         // otherwise emits confusing GPU errors at load time).
         fp.use_gpu = false;
-        Self { fp }
+        Self { fp, dtw: None }
     }
 }
 
@@ -41,9 +121,21 @@ impl ContextParams {
         self
     }
 
-    /// Enable flash attention (default off; incompatible with DTW).
+    /// Enable flash attention (default off when DTW is in use; flash
+    /// attention does not materialize the cross-attention scores DTW needs).
     pub fn flash_attn(&mut self, enabled: bool) -> &mut Self {
         self.fp.flash_attn = enabled;
+        self
+    }
+
+    /// Align token timestamps with the DTW algorithm for `heads`.
+    ///
+    /// DTW maps the decoded text onto the audio with dynamic time warping,
+    /// which stays accurate over long or music-heavy windows where the plain
+    /// attention-based timestamps drift. Pass `None` to keep the whisper.cpp
+    /// default alignment.
+    pub fn dtw_timestamps(&mut self, heads: Option<AlignmentHeads>) -> &mut Self {
+        self.dtw = heads;
         self
     }
 }
@@ -66,7 +158,11 @@ impl WhisperContext {
         // Safety: `path` is a valid NUL-terminated C string and `params` is a
         // fully initialized copy of `whisper_context_default_params`; the
         // returned pointer is null-checked.
-        let ctx = unsafe { sys::whisper_init_from_file_with_params(path.as_ptr(), params.fp) };
+        let fp = match params.dtw {
+            Some(heads) => with_dtw(params.fp, heads),
+            None => params.fp,
+        };
+        let ctx = unsafe { sys::whisper_init_from_file_with_params(path.as_ptr(), fp) };
         if ctx.is_null() {
             return Err(WhisperError::ContextLoadFailed);
         }
@@ -90,6 +186,19 @@ impl Drop for WhisperContext {
         // Drop runs exactly once per context.
         unsafe { sys::whisper_free(self.ctx) };
     }
+}
+
+/// Applies a DTW request to the raw parameters: enables DTW token
+/// timestamps, selects the alignment heads, and switches flash attention off
+/// (it does not materialize the cross-attention scores DTW reads).
+fn with_dtw(
+    mut fp: sys::whisper_context_params,
+    heads: AlignmentHeads,
+) -> sys::whisper_context_params {
+    fp.dtw_token_timestamps = true;
+    fp.dtw_aheads_preset = heads.as_sys();
+    fp.flash_attn = false;
+    fp
 }
 
 fn c_string_path(path: &Path) -> Result<CString, WhisperError> {
@@ -122,6 +231,43 @@ mod tests {
         assert!(fp(&params).use_gpu);
         assert!(!fp(&params).flash_attn);
         assert_eq!(fp(&params).gpu_device, 2);
+    }
+
+    #[test]
+    fn dtw_requests_disable_flash_attention() {
+        let params = ContextParams::default();
+        let fp = with_dtw(params.fp, AlignmentHeads::BaseEn);
+
+        assert!(fp.dtw_token_timestamps);
+        assert_eq!(
+            fp.dtw_aheads_preset,
+            sys::whisper_alignment_heads_preset_WHISPER_AHEADS_BASE_EN
+        );
+        assert!(!fp.flash_attn, "DTW needs raw cross-attention scores");
+    }
+
+    #[test]
+    fn alignment_presets_are_inferred_from_model_names() {
+        for (name, expected) in [
+            ("/models/ggml-tiny.en.bin", Some(AlignmentHeads::TinyEn)),
+            ("/models/ggml-base.en.bin", Some(AlignmentHeads::BaseEn)),
+            ("/models/ggml-small.en.bin", Some(AlignmentHeads::SmallEn)),
+            ("/models/ggml-base.bin", Some(AlignmentHeads::Base)),
+            (
+                "/models/ggml-large-v3-turbo.bin",
+                Some(AlignmentHeads::LargeV3Turbo),
+            ),
+            ("/models/ggml-large-v3.bin", Some(AlignmentHeads::LargeV3)),
+            ("/models/ggml-large-v2.bin", Some(AlignmentHeads::LargeV2)),
+            ("/models/ggml-medium.en.bin", Some(AlignmentHeads::MediumEn)),
+            ("/models/my-custom.bin", None),
+        ] {
+            assert_eq!(
+                AlignmentHeads::for_model(Path::new(name)),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]

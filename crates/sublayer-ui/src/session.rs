@@ -138,6 +138,9 @@ pub struct Session {
     pub render_probe: HardwareProbe,
     /// Encoder the next render will use.
     pub render_encoder: HardwareEncoder,
+    /// Encoders tried after `render_encoder` fails at runtime; non-empty only
+    /// when the probe resolved with `auto`.
+    pub render_fallbacks: Vec<HardwareEncoder>,
     /// x264 CRF / NVENC & VA-API quality for renders.
     pub render_quality: u8,
     /// Running task indicator.
@@ -163,6 +166,7 @@ impl Default for Session {
             preset_index: 0,
             render_probe: HardwareProbe::default(),
             render_encoder: HardwareEncoder::Cpu,
+            render_fallbacks: Vec::new(),
             render_quality: 20,
             task: TaskState::default(),
             preview: PreviewState::default(),
@@ -528,10 +532,16 @@ impl Session {
         );
     }
 
-    /// Adopts the encoder resolved by the hardware probe.
-    pub fn set_render_encoder(&mut self, probe: HardwareProbe, encoder: HardwareEncoder) {
+    /// Adopts the encoder chain resolved by the hardware probe.
+    pub fn set_render_encoder(
+        &mut self,
+        probe: HardwareProbe,
+        encoder: HardwareEncoder,
+        fallbacks: Vec<HardwareEncoder>,
+    ) {
         self.render_probe = probe;
         self.render_encoder = encoder;
+        self.render_fallbacks = fallbacks;
     }
 
     /// Marks the running task as finished.
@@ -844,8 +854,10 @@ mod tests {
                 vaapi_device: None,
             },
             HardwareEncoder::Nvenc,
+            vec![HardwareEncoder::Cpu],
         );
         assert_eq!(session.render_encoder, HardwareEncoder::Nvenc);
+        assert_eq!(session.render_fallbacks, vec![HardwareEncoder::Cpu]);
         assert!(session.render_probe.nvenc);
     }
 }

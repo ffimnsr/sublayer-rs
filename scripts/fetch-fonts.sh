@@ -1,6 +1,7 @@
 #!/bin/sh
 # Re-downloads the bundled caption fonts from their upstream sources.
-# All files are SIL OFL 1.1 licensed. See assets/fonts/README.md.
+# All files are SIL OFL 1.1 licensed, except KomikaAxis.ttf which is
+# freeware and vendored manually. See assets/fonts/README.md.
 set -eu
 
 cd "$(dirname "$0")/../assets/fonts"

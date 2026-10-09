@@ -215,6 +215,84 @@ async fn renders_from_paths_with_filter_separators() {
 }
 
 #[tokio::test]
+async fn a_failing_encoder_falls_back_to_the_next_in_the_chain() {
+    let Some((mut options, fonts_dir)) = render_setup().await else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let video = directory.path().join("clip.mp4");
+    if let Err(error) = generate_clip(&video, 1).await {
+        eprintln!("skipping: could not create the test clip ({error})");
+        return;
+    }
+    let metadata = probe_video(&video).await.unwrap();
+    options.duration_ms = metadata.duration_ms();
+    // A bogus VA-API device makes the first attempt fail at startup on every
+    // machine, without depending on driver or build differences.
+    options.encoder = HardwareEncoder::Vaapi;
+    options.vaapi_device = Some(directory.path().join("no-such-render-node"));
+    options.fallbacks = vec![HardwareEncoder::Cpu];
+    let project = test_project(&video, metadata);
+    let output = directory.path().join("out.mp4");
+
+    let (progress_tx, mut progress_rx) = mpsc::channel(64);
+    let render = export_project(&project, &output, &fonts_dir, &options, progress_tx);
+    let collector = tokio::spawn(async move { while progress_rx.recv().await.is_some() {} });
+
+    let used = render
+        .await
+        .expect("the CPU fallback must finish the render");
+    collector.await.unwrap();
+    assert_eq!(
+        used,
+        HardwareEncoder::Cpu,
+        "the failed VA-API attempt must not be reported"
+    );
+    assert!(std::fs::metadata(&output).unwrap().len() > 1_000);
+}
+
+#[tokio::test]
+async fn a_dropped_receiver_cancels_instead_of_falling_back() {
+    let Some((mut options, fonts_dir)) = render_setup().await else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let video = directory.path().join("clip.mp4");
+    if let Err(error) = generate_clip(&video, 1).await {
+        eprintln!("skipping: could not create the test clip ({error})");
+        return;
+    }
+    let metadata = probe_video(&video).await.unwrap();
+    options.duration_ms = metadata.duration_ms();
+    options.encoder = HardwareEncoder::Vaapi;
+    options.vaapi_device = Some(directory.path().join("no-such-render-node"));
+    options.fallbacks = vec![HardwareEncoder::Cpu];
+    let ass = directory.path().join("subs.ass");
+    std::fs::write(
+        &ass,
+        sublayer_subtitles::build_ass_script(
+            &[CaptionSegment::new(vec![WordToken::new("hi", 0, 500)])],
+            &sublayer_subtitles::preset("tiktok").expect("built-in preset"),
+            &metadata,
+            &fonts_dir,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let output = directory.path().join("cancelled.mp4");
+
+    // The receiver is gone before the render starts, so the failing VA-API
+    // attempt must report cancellation rather than start a CPU fallback.
+    let (progress_tx, progress_rx) = mpsc::channel(4);
+    drop(progress_rx);
+    let result = run_export(&video, &output, &ass, &fonts_dir, &options, progress_tx).await;
+    assert!(
+        matches!(result, Err(ExportError::Cancelled)),
+        "expected cancellation, got {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn missing_input_is_reported_as_a_render_failure() {
     let Some((options, fonts_dir)) = render_setup().await else {
         return;

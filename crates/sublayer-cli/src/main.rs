@@ -16,7 +16,9 @@ use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use sublayer_ai::{ModelManager, TranscriberConfig, transcribe_audio};
 use sublayer_core::{SublayerPaths, VideoMetadata};
-use sublayer_export::{EncoderPreference, ExportOptions, probe_hardware, run_export};
+use sublayer_export::{
+    EncoderPreference, ExportOptions, HardwareEncoder, probe_hardware, run_export,
+};
 use sublayer_media::{extract_audio_16k, probe_video};
 use sublayer_subtitles::{
     build_ass_script, build_srt, build_vtt, preset, resolve_fonts_dir, segment_words,
@@ -358,16 +360,27 @@ async fn run_render(options: RenderOptions) -> Result<(), CliError> {
     };
 
     let probe = probe_hardware().await?;
-    let hardware = probe.select(preference)?;
-    println!("Encoding with {}", hardware.label());
+    // `auto` yields the whole chain so a probed device that cannot actually
+    // encode degrades to the next backend at runtime; an explicit choice
+    // yields exactly one encoder and never silently renders on another.
+    let chain = probe.chain(preference)?;
+    let (encoder, fallbacks) = chain
+        .split_first()
+        .expect("the probe chain always contains at least the CPU");
+    println!("Encoding with {}", encoder.label());
 
     let export_options = ExportOptions {
-        encoder: hardware,
+        encoder: *encoder,
+        fallbacks: fallbacks.to_vec(),
         duration_ms: metadata.duration_ms(),
         quality,
         vaapi_device: probe.vaapi_device.clone(),
     };
-    render_with_progress(&input, &output, &ass_path, &fonts_dir, &export_options).await?;
+    let used =
+        render_with_progress(&input, &output, &ass_path, &fonts_dir, &export_options).await?;
+    if used != *encoder {
+        println!("{} failed; finished with {}", encoder.label(), used.label());
+    }
     println!("Wrote {}", output.display());
     Ok(())
 }
@@ -417,13 +430,16 @@ async fn transcribe_words(
 }
 
 /// Runs the FFmpeg render while painting percentage, fps, and ETA on stderr.
+///
+/// Returns the encoder that finished the render, which differs from
+/// `options.encoder` when a fallback was needed.
 async fn render_with_progress(
     input: &Path,
     output: &Path,
     ass_path: &Path,
     fonts_dir: &Path,
     options: &ExportOptions,
-) -> Result<(), CliError> {
+) -> Result<HardwareEncoder, CliError> {
     let bar = ProgressBar::new(1_000);
     bar.set_style(
         ProgressStyle::with_template("{msg} [{bar:28}]")
@@ -460,10 +476,10 @@ async fn render_with_progress(
     }
     bar.finish_and_clear();
 
-    render
+    let used = render
         .await
         .map_err(|error| CliError::TaskJoin(error.to_string()))??;
-    Ok(())
+    Ok(used)
 }
 
 /// Formats a duration in seconds as `MM:SS`.

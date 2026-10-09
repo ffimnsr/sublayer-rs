@@ -132,9 +132,19 @@ fn encoder_label_reflects_the_probe() {
             vaapi_device: Some(PathBuf::from("/dev/dri/renderD128")),
         },
         sublayer_export::HardwareEncoder::Vaapi,
+        Vec::new(),
     );
     refresh_encoder(&ui, &session);
     assert_eq!(ui.get_encoder_label().as_str(), "Encoder: VA-API");
+
+    // An `auto` selection advertises that a runtime fallback is possible.
+    session.set_render_encoder(
+        sublayer_export::HardwareProbe::default(),
+        sublayer_export::HardwareEncoder::Vaapi,
+        vec![sublayer_export::HardwareEncoder::Cpu],
+    );
+    refresh_encoder(&ui, &session);
+    assert_eq!(ui.get_encoder_label().as_str(), "Encoder: VA-API (auto)");
 }
 
 #[test]

@@ -26,8 +26,9 @@ video ──▶ ffprobe ──▶ 16 kHz audio ──▶ Whisper (VAD + word tim
 
 - **Word-level transcription** with whisper.cpp through the workspace's own
   `sublayer-whisper` bindings (built on the raw `whisper-rs-sys` FFI; GGML
-  models pinned by SHA-256) and an energy-based VAD pre-filter that skips
-  silence.
+  models pinned by SHA-256), DTW-aligned word timestamps, an energy-based VAD
+  pre-filter that skips silence, and bounded inference windows so alignment
+  stays accurate over music-heavy clips.
 - **Caption cards** built by clustering heuristics: sentence endings, pauses,
   clause boundaries, and per-card length/duration ceilings.
 - **ASS compiler** with karaoke, word-pop, and bounce animations, plus five
@@ -37,7 +38,8 @@ video ──▶ ffprobe ──▶ 16 kHz audio ──▶ Whisper (VAD + word tim
   an interactive waveform timeline with draggable/trimmable caption cards,
   and a style inspector that edits the theme as you type.
 - **Hardware-accelerated export**: probes VA-API, then NVENC, then falls back
-  to `libx264`; streams percentage, fps, and ETA while rendering.
+  to `libx264`, retrying at runtime when a probed encoder cannot start;
+  streams percentage, fps, and ETA while rendering.
 - **Headless CLI** for batch and CI workloads: `probe`, `transcribe`, `render`.
 - **Packaging**: Flatpak manifest (`--device=dri`, Wayland & PipeWire sockets)
   and an AppImage build script.
@@ -49,7 +51,7 @@ video ──▶ ffprobe ──▶ 16 kHz audio ──▶ Whisper (VAD + word tim
 | Linux | Wayland or X11; the studio uses a plain winit window, no XEmbed tricks |
 | Rust | 1.92+ for the desktop UI (Slint), 1.85+ for everything else |
 | FFmpeg | `ffmpeg` **and** `ffprobe` on `PATH`; override with `SUBLAYER_FFMPEG` / `SUBLAYER_FFPROBE` |
-| Fonts | Bundled in `assets/fonts/` (SIL OFL 1.1); override with `SUBLAYER_FONTS_DIR` |
+| Fonts | Bundled in `assets/fonts/` (SIL OFL 1.1, plus freeware Komika Axis); override with `SUBLAYER_FONTS_DIR` |
 | GPU | optional: Vulkan for Whisper, VA-API/NVENC for encoding, `--device=dri` when sandboxed |
 
 Whisper models are downloaded on demand into `$XDG_DATA_HOME/sublayer/models/`
@@ -88,7 +90,8 @@ cargo build --release -p sublayer-ui -p sublayer-cli --features sublayer-ai/vulk
    style controls update the preview overlay immediately.
 4. **Export** — `Export ASS` writes the subtitle file; `Export Video` picks a
    destination and burns the captions in with the probed encoder. The status
-   bar shows the render percentage, fps, and ETA.
+   bar shows the render percentage, fps, and ETA, then the encoder that
+   finished the render.
 5. **Save** — `.sublayer` project files keep the video path, metadata, caption
    cards, and theme together.
 
@@ -113,7 +116,9 @@ sublayer render input.mp4 -o out.mp4 --subtitles subs.ass --encoder cpu --qualit
 Render flags: `--subtitles <file.ass>` skips transcription, `--encoder
 auto|vaapi|nvenc|cpu` forces a backend, `--quality 0–51` sets `-crf` (x264),
 `-cq` (NVENC), or `-qp` (VA-API). Progress (percentage, fps, ETA) is painted
-on stderr, so output can be piped safely.
+on stderr, so output can be piped safely. With `auto`, a backend that fails
+at startup is retried down the chain and the CLI prints the fallback. Cards
+wider than the frame are scaled down automatically to fit the video width.
 
 ## Hardware acceleration
 
@@ -123,8 +128,11 @@ on stderr, so output can be piped safely.
 - **NVENC** (NVIDIA) is used when an NVIDIA device node is present *and*
   `h264_nvenc` is available.
 - Otherwise the render falls back to `libx264` (`-preset medium`).
-- An explicit `--encoder` (or `SUBLAYER_ENCODER`) that is unavailable is an
-  error rather than a silent downgrade; `auto` walks the chain above.
+- An `auto` render keeps the whole chain: when a probed encoder fails to
+  start (a driver may list `h264_vaapi` yet expose no usable encode
+  profile), the render retries the next backend and finishes on `libx264`.
+- An explicit `--encoder` (or `SUBLAYER_ENCODER`) pins one backend: an
+  unavailable or failing one is reported rather than silently downgraded.
 
 Whisper GPU is selected at runtime with the GPU switch (`--gpu` on the CLI)
 and requires the Vulkan-enabled build.
@@ -136,7 +144,7 @@ and requires the Vulkan-enabled build.
 | `SUBLAYER_FFMPEG` / `SUBLAYER_FFPROBE` | Explicit executables, useful inside Flatpak or custom installs |
 | `SUBLAYER_FONTS_DIR` | Font directory handed to libass (`fontsdir=`) |
 | `SUBLAYER_ENCODER` | Encoder preference: `auto`, `vaapi`, `nvenc`, `cpu` |
-| `RUST_LOG` | Log filter for the desktop app and CLI diagnostics (stderr); e.g. `RUST_LOG=sublayer_media=debug` |
+| `RUST_LOG` | Log filter for diagnostics (stderr); whisper.cpp/ggml output is routed here as the `whisper` target, e.g. `RUST_LOG=sublayer_media=debug,whisper=debug` |
 | `SLINT_BACKEND` | Force a Slint backend, e.g. `winit-software` without GL drivers |
 
 XDG locations: models in `$XDG_DATA_HOME/sublayer/models`, configuration in

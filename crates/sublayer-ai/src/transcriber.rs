@@ -6,6 +6,12 @@
 //! `whisper-rs-sys`) no longer ships the experimental DTW model loader, so
 //! full DTW is not available at this whisper.cpp revision.
 //!
+//! Audio is still cut into short windows before inference: the built-in
+//! alignment is anchored to the decoded segment and drifts over long windows.
+//! Measured on a 25 s music-heavy clip, one window placed the closing line
+//! 0.8 s late, while windows capped at [`MAX_WINDOW_MS`] and cut at the
+//! quietest frame near the cap matched the speech within ~0.1 s.
+//!
 //! Inference is blocking C code and runs on `tokio::task::spawn_blocking`; the
 //! returned future cannot be cancelled mid-window (whisper.cpp finishes the
 //! current window), but dropping it never leaks processes or memory.
@@ -22,7 +28,9 @@ use std::path::Path;
 
 use hound::{SampleFormat, WavReader};
 use sublayer_core::WordToken;
-use sublayer_whisper::{ContextParams, FullParams, SamplingStrategy, WhisperContext, WhisperState};
+use sublayer_whisper::{
+    AlignmentHeads, ContextParams, FullParams, SamplingStrategy, WhisperContext, WhisperState,
+};
 use tokio::sync::mpsc::Sender;
 
 use crate::AiError;
@@ -80,54 +88,156 @@ pub async fn transcribe_audio(
         .map_err(|error| AiError::TaskJoin(error.to_string()))?
 }
 
+/// Longest window handed to whisper.cpp in a single call.
+///
+/// The token-level alignment is anchored to the decoded segment, so its error
+/// grows with the window length; cutting long input keeps every word close to
+/// the speech that produced it.
+const MAX_WINDOW_MS: u64 = 10_000;
+
+/// Trailing zone of a full window searched for a quiet cut point.
+const CUT_SEARCH_MS: u64 = 2_000;
+
+/// RMS analysis frame used to pick a cut point.
+const CUT_FRAME_MS: u64 = 30;
+
+/// One transcription window: where it starts on the source timeline and which
+/// samples it covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WhisperWindow {
+    /// Milliseconds from the start of the source media.
+    offset_ms: u64,
+    /// First sample of the window.
+    start: usize,
+    /// One-past-last sample of the window.
+    end: usize,
+}
+
+/// Windows whose concatenation covers `[start, end)`.
+///
+/// Every window is at most [`MAX_WINDOW_MS`] long; full windows are cut at
+/// the quietest [`CUT_FRAME_MS`] frame of their trailing
+/// [`CUT_SEARCH_MS`], which lands between words instead of inside them.
+fn whisper_windows(
+    samples: &[f32],
+    sample_rate: u32,
+    start: usize,
+    end: usize,
+) -> Vec<WhisperWindow> {
+    let rate = u64::from(sample_rate);
+    if rate == 0 || start >= end || end > samples.len() {
+        return Vec::new();
+    }
+    let max_samples = (rate * MAX_WINDOW_MS / 1_000) as usize;
+    let search = (rate * CUT_SEARCH_MS / 1_000).max(1) as usize;
+    let frame = (rate * CUT_FRAME_MS / 1_000).max(1) as usize;
+
+    let mut windows = Vec::new();
+    let mut from = start;
+    while from < end {
+        let limit = from.saturating_add(max_samples).min(end);
+        let cut = if limit == end {
+            end
+        } else {
+            quietest_cut(
+                samples,
+                limit.saturating_sub(search).max(from),
+                limit,
+                frame,
+            )
+            .map(|cut| cut.max(from + frame).min(limit))
+            .unwrap_or(limit)
+        };
+        windows.push(WhisperWindow {
+            offset_ms: from as u64 * 1_000 / rate,
+            start: from,
+            end: cut,
+        });
+        from = cut;
+    }
+    windows
+}
+
+/// End of the quietest `frame`-long analysis window in `[from, limit)`.
+///
+/// A frame inside a word is louder than the pause before or after it, so the
+/// minimum tends to be silence between words.
+fn quietest_cut(samples: &[f32], from: usize, limit: usize, frame: usize) -> Option<usize> {
+    let mut index = from;
+    let mut best: Option<(f64, usize)> = None;
+    while index < limit {
+        let end = (index + frame).min(limit);
+        if end <= index {
+            break;
+        }
+        let energy: f64 = samples[index..end]
+            .iter()
+            .map(|sample| f64::from(*sample) * f64::from(*sample))
+            .sum();
+        let energy = energy / (end - index) as f64;
+        if best.is_none_or(|(best_energy, _)| energy < best_energy) {
+            best = Some((energy, end));
+        }
+        index += frame;
+    }
+    best.map(|(_, end)| end)
+}
+
+/// Splits the track into the windows that will be fed to whisper.cpp.
+///
+/// With the VAD enabled the spans it detects are used and capped; otherwise
+/// the whole track is chunked.
+fn speech_windows(samples: &[f32], enable_vad: bool) -> Vec<WhisperWindow> {
+    if !enable_vad {
+        return whisper_windows(samples, WHISPER_SAMPLE_RATE, 0, samples.len());
+    }
+    detect_speech(samples, WHISPER_SAMPLE_RATE, &VadConfig::default())
+        .iter()
+        .flat_map(|segment| {
+            let start = segment.start_sample(WHISPER_SAMPLE_RATE);
+            let end = segment.end_sample(WHISPER_SAMPLE_RATE).min(samples.len());
+            whisper_windows(samples, WHISPER_SAMPLE_RATE, start, end)
+        })
+        .collect()
+}
+
 fn transcribe_blocking(
     wav_path: &Path,
     config: &TranscriberConfig,
     progress_tx: &Sender<f32>,
 ) -> Result<Vec<WordToken>, AiError> {
+    // Route whisper.cpp/ggml chatter into `tracing` instead of stderr, so the
+    // CLI progress bar and the studio status line stay readable.
+    sublayer_whisper::install_log_handler();
+
     let samples = read_16k_mono_wav(wav_path)?;
 
     let mut context_params = ContextParams::default();
     context_params.use_gpu(config.use_gpu);
+    // DTW word alignment: with the pinned models the right alignment-head
+    // preset is known from the file name; custom models fall back to the
+    // attention-based timestamps.
+    context_params.dtw_timestamps(AlignmentHeads::for_model(&config.model_path));
     let context = WhisperContext::new_with_params(&config.model_path, context_params)?;
 
     let mut words = Vec::new();
-    if config.enable_vad {
-        let segments = detect_speech(&samples, WHISPER_SAMPLE_RATE, &VadConfig::default());
-        let window_count = segments.len().max(1) as f32;
-        for (index, segment) in segments.iter().enumerate() {
-            let start = segment.start_sample(WHISPER_SAMPLE_RATE);
-            let end = segment.end_sample(WHISPER_SAMPLE_RATE).min(samples.len());
-            if start >= end {
-                continue;
-            }
-
-            let mut params = make_params(config);
-            let sender = progress_tx.clone();
-            let window_index = index as f32;
-            let mut progress = move |percent: i32| {
-                let value = (window_index + percent as f32 / 100.0) / window_count;
-                let _ = sender.try_send(value);
-            };
-            params.set_progress_callback(&mut progress);
-
-            let mut state = context.create_state()?;
-            state.full(&mut params, &samples[start..end])?;
-            // `params` (and with it the progress callback) is dropped here, so
-            // the sender clone dies and the channel closes.
-            append_words(&state, &mut words, segment.start_ms);
-        }
-    } else {
+    let windows = speech_windows(&samples, config.enable_vad);
+    let window_count = windows.len().max(1) as f32;
+    for (index, window) in windows.iter().enumerate() {
         let mut params = make_params(config);
         let sender = progress_tx.clone();
+        let window_index = index as f32;
         let mut progress = move |percent: i32| {
-            let _ = sender.try_send(percent as f32 / 100.0);
+            let value = (window_index + percent as f32 / 100.0) / window_count;
+            let _ = sender.try_send(value);
         };
         params.set_progress_callback(&mut progress);
 
         let mut state = context.create_state()?;
-        state.full(&mut params, &samples)?;
-        append_words(&state, &mut words, 0);
+        state.full(&mut params, &samples[window.start..window.end])?;
+        // `params` (and with it the progress callback) is dropped here, so
+        // the sender clone dies and the channel closes.
+        append_words(&state, &mut words, window.offset_ms);
     }
 
     let _ = progress_tx.try_send(1.0);
@@ -165,7 +275,7 @@ fn append_words(state: &WhisperState<'_>, words: &mut Vec<WordToken>, offset_ms:
         .flat_map(|segment| {
             segment
                 .tokens()
-                .map(|token| (token.text_lossy(), token.t0(), token.t1()))
+                .map(|token| (token.text_lossy(), token.start_ms(), token.end_ms()))
         })
         .collect();
 
@@ -548,6 +658,67 @@ mod tests {
             assert!(!word.text.is_empty());
             assert!(word.end_ms >= word.start_ms);
         }
+    }
+
+    // ------------------------------------------------------------ window plan
+
+    #[test]
+    fn windows_cover_the_audio_in_bounded_chunks() {
+        let samples = tone_samples(40 * WHISPER_SAMPLE_RATE as usize);
+        let windows = whisper_windows(&samples, WHISPER_SAMPLE_RATE, 0, samples.len());
+
+        assert!(windows.len() >= 4, "40 s must split, got {windows:?}");
+        assert_eq!(windows.first().unwrap().start, 0);
+        assert_eq!(windows.last().unwrap().end, samples.len());
+        for pair in windows.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start, "windows must be contiguous");
+        }
+        let max = MAX_WINDOW_MS as usize * WHISPER_SAMPLE_RATE as usize / 1_000;
+        for window in &windows {
+            assert!(
+                window.end - window.start <= max,
+                "{window:?} exceeds the cap"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_cut_at_the_quietest_frame_near_the_limit() {
+        // A loud tone with a silent notch at 9 s: the first cut belongs there
+        // instead of mid-tone at the 10 s cap.
+        let mut samples = vec![0.5_f32; 20 * WHISPER_SAMPLE_RATE as usize];
+        let quiet = 9 * WHISPER_SAMPLE_RATE as usize;
+        samples[quiet..quiet + 200].fill(0.0);
+
+        let windows = whisper_windows(&samples, WHISPER_SAMPLE_RATE, 0, samples.len());
+        let first = windows[0];
+
+        assert!(
+            first.end >= quiet && first.end <= quiet + 200 + 480,
+            "cut {} outside the notch at {quiet}",
+            first.end
+        );
+    }
+
+    #[test]
+    fn window_offsets_track_the_source_timeline() {
+        let samples = tone_samples(20 * WHISPER_SAMPLE_RATE as usize);
+        let windows = whisper_windows(&samples, WHISPER_SAMPLE_RATE, 0, samples.len());
+        let second = windows[1];
+
+        let expected = (second.start as u64 * 1_000 / u64::from(WHISPER_SAMPLE_RATE)) as i64;
+        assert!((second.offset_ms as i64 - expected).abs() <= 1);
+        assert!(second.offset_ms >= 8_000, "offset {}", second.offset_ms);
+    }
+
+    #[test]
+    fn degenerate_ranges_produce_no_windows() {
+        let samples = tone_samples(1_000);
+        assert!(whisper_windows(&samples, WHISPER_SAMPLE_RATE, 0, 0).is_empty());
+        assert!(whisper_windows(&samples, WHISPER_SAMPLE_RATE, 500, 500).is_empty());
+        assert!(whisper_windows(&samples, WHISPER_SAMPLE_RATE, 800, 500).is_empty());
+        assert!(whisper_windows(&samples, WHISPER_SAMPLE_RATE, 0, 2_000).is_empty());
+        assert!(whisper_windows(&samples, 0, 0, 1_000).is_empty());
     }
 
     fn tone_samples(count: usize) -> Vec<f32> {

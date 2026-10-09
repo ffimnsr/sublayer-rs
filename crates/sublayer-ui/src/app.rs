@@ -77,9 +77,17 @@ impl App {
         let models = Rc::new(UiModels::new());
         models.attach(&ui);
         wire_callbacks(&ui, &bridge, &session, &models, &media);
-        // Resolve the render encoder in the background; renders use it until
-        // the user overrides via `SUBLAYER_ENCODER`.
-        bridge.probe_render_encoder(EncoderPreference::default());
+        // Resolve the render encoder in the background; `SUBLAYER_ENCODER`
+        // pins a backend, otherwise the probe picks the best one.
+        let preference = match EncoderPreference::from_env() {
+            Ok(Some(preference)) => preference,
+            Ok(None) => EncoderPreference::default(),
+            Err(error) => {
+                tracing::warn!(%error, "ignoring invalid SUBLAYER_ENCODER");
+                EncoderPreference::default()
+            }
+        };
+        bridge.probe_render_encoder(preference);
 
         let timer = slint::Timer::default();
         {
@@ -543,6 +551,7 @@ fn handle_event(
                 session.project.clone().map(|project| {
                     let options = ExportOptions {
                         encoder: session.render_encoder,
+                        fallbacks: session.render_fallbacks.clone(),
                         duration_ms: project.video_metadata.duration_ms(),
                         quality: session.render_quality,
                         vaapi_device: session.render_probe.vaapi_device.clone(),
@@ -554,14 +563,22 @@ fn handle_event(
                 bridge.export_video(project, media.fonts_dir.clone(), path, options);
             }
         }
-        UiEvent::VideoExported { path } => {
-            session
-                .borrow_mut()
-                .finish_task(format!("Wrote {}", path.display()));
+        UiEvent::VideoExported { path, encoder } => {
+            session.borrow_mut().finish_task(format!(
+                "Wrote {} ({})",
+                path.display(),
+                encoder.label()
+            ));
             refresh_task(ui, &session.borrow());
         }
-        UiEvent::HardwareProbed { probe, encoder } => {
-            session.borrow_mut().set_render_encoder(probe, encoder);
+        UiEvent::HardwareProbed {
+            probe,
+            encoder,
+            fallbacks,
+        } => {
+            session
+                .borrow_mut()
+                .set_render_encoder(probe, encoder, fallbacks);
             let session = session.borrow();
             refresh_encoder(ui, &session);
         }

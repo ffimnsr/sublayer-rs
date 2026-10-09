@@ -194,8 +194,16 @@ pub(crate) fn refresh_task(ui: &MainWindow, session: &Session) {
 }
 
 /// Pushes the encoder chosen for the next render.
+///
+/// A non-empty fallback list means `auto` probing picked the encoder, so the
+/// label says so: the render may still finish on another backend.
 pub(crate) fn refresh_encoder(ui: &MainWindow, session: &Session) {
-    ui.set_encoder_label(format!("Encoder: {}", session.render_encoder.label()).into());
+    let suffix = if session.render_fallbacks.is_empty() {
+        ""
+    } else {
+        " (auto)"
+    };
+    ui.set_encoder_label(format!("Encoder: {}{suffix}", session.render_encoder.label()).into());
 }
 
 /// Converts a domain color into a Slint color.

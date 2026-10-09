@@ -33,14 +33,16 @@ pub use runner::{ExportOptions, ExportProgress, run_export};
 /// The ASS script is compiled to a temporary file first, so the export honours
 /// exactly the same theme, fonts directory, and metadata as the caption
 /// export. Missing output directories are created; the FFmpeg encoder is
-/// cancelled when `progress_tx` is dropped.
+/// cancelled when `progress_tx` is dropped. The returned encoder is the one
+/// that actually produced the file, which may be a fallback when
+/// [`ExportOptions::fallbacks`] is populated.
 pub async fn export_project(
     project: &Project,
     output_video: &Path,
     fonts_dir: &Path,
     options: &ExportOptions,
     progress_tx: Sender<ExportProgress>,
-) -> Result<(), ExportError> {
+) -> Result<HardwareEncoder, ExportError> {
     let script = build_ass_script(
         &project.segments,
         &project.theme,

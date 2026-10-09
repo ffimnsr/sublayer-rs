@@ -15,13 +15,16 @@
 //!   crossing into C; out-of-range access returns `None` instead of relying on
 //!   C-side behavior.
 //!
+//! Diagnostics from whisper.cpp and ggml are forwarded into `tracing` by
+//! [`install_log_handler`] instead of flooding stderr.
+//!
 //! # Safety audit
 //!
 //! All `unsafe` blocks in this crate are one of:
 //!
 //! 1. FFI calls whose arguments are validated non-null / non-empty first;
 //! 2. `CStr` reads of pointers whisper.cpp guarantees to be NUL-terminated for
-//!    live segments and tokens;
+//!    live segments, tokens, and log lines;
 //! 3. the two callback trampolines, which reborrow `user_data` pointers
 //!    installed by the `FullParams` builder. whisper.cpp only invokes them
 //!    from the thread calling [`WhisperState::full`], while the originating
@@ -30,10 +33,12 @@
 
 pub mod context;
 pub mod error;
+pub mod log;
 pub mod params;
 pub mod state;
 
-pub use context::{ContextParams, WhisperContext};
+pub use context::{AlignmentHeads, ContextParams, WhisperContext};
 pub use error::WhisperError;
+pub use log::install_log_handler;
 pub use params::{FullParams, SamplingStrategy};
 pub use state::{Segment, Segments, Token, Tokens, WhisperState};

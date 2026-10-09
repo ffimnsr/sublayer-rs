@@ -114,17 +114,21 @@ impl<'a, 'ctx> Segment<'a, 'ctx> {
             .unwrap_or_default()
     }
 
-    /// Start time in centiseconds (10 ms units), as returned by whisper.cpp.
-    pub fn start_timestamp(&self) -> i64 {
+    /// Start time in milliseconds; whisper.cpp reports 10 ms units.
+    pub fn start_ms(&self) -> i64 {
         // Safety: `state` is live and `index` is in bounds (iteration is
         // bounds-checked or derived from `n_segments`).
-        unsafe { sys::whisper_full_get_segment_t0_from_state(self.state.raw(), self.index) }
+        let centiseconds =
+            unsafe { sys::whisper_full_get_segment_t0_from_state(self.state.raw(), self.index) };
+        centiseconds * 10
     }
 
-    /// End time in centiseconds (10 ms units), as returned by whisper.cpp.
-    pub fn end_timestamp(&self) -> i64 {
-        // Safety: see `start_timestamp`.
-        unsafe { sys::whisper_full_get_segment_t1_from_state(self.state.raw(), self.index) }
+    /// End time in milliseconds; whisper.cpp reports 10 ms units.
+    pub fn end_ms(&self) -> i64 {
+        // Safety: see `start_ms`.
+        let centiseconds =
+            unsafe { sys::whisper_full_get_segment_t1_from_state(self.state.raw(), self.index) };
+        centiseconds * 10
     }
 
     /// Number of tokens in this segment.
@@ -239,13 +243,21 @@ impl<'a, 'ctx> Token<'a, 'ctx> {
     }
 
     /// Start time in milliseconds.
-    pub fn t0(&self) -> i64 {
-        self.data().t0
+    ///
+    /// When the context was created with DTW alignment enabled, this prefers
+    /// the DTW time (`t_dtw`) and falls back to the attention-based `t0`;
+    /// both are centiseconds in whisper.cpp, so either way the value is
+    /// scaled to milliseconds here.
+    pub fn start_ms(&self) -> i64 {
+        let data = self.data();
+        let centiseconds = if data.t_dtw > 0 { data.t_dtw } else { data.t0 };
+        centiseconds * 10
     }
 
-    /// End time in milliseconds.
-    pub fn t1(&self) -> i64 {
-        self.data().t1
+    /// End time in milliseconds; token data uses the same 10 ms units as
+    /// segment timestamps.
+    pub fn end_ms(&self) -> i64 {
+        self.data().t1 * 10
     }
 
     /// Probability of this token.

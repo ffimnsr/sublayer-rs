@@ -17,12 +17,17 @@
 //!
 //! When `fonts_dir` is non-empty, a `[Fonts]` section pins libass to the
 //! bundled font directory so rendering is deterministic across systems.
+//!
+//! Cards stay on one line (`WrapStyle: 2`), so the compiler measures each card
+//! against the theme font and shrinks the font of cards that would overflow the
+//! frame; see `crate::metrics`.
 
 use std::path::Path;
 
 use sublayer_core::{AnimationType, CaptionSegment, Rgba, ThemeStyle, VideoMetadata, WordToken};
 
 use crate::SubtitleError;
+use crate::metrics::{self, Measurer};
 
 /// Playback resolution used when the video metadata carries no dimensions.
 const FALLBACK_RESOLUTION: (u32, u32) = (1920, 1080);
@@ -50,18 +55,34 @@ pub fn build_ass_script(
         FALLBACK_RESOLUTION
     };
     let scale = height as f32 / REFERENCE_HEIGHT;
+    let font_size = scaled_font_size(theme, scale);
+    let font_data = metrics::theme_font_data(fonts_dir, &theme.font_name);
+    let measurer = Measurer::new(font_data.as_deref());
+    let card_width = metrics::max_card_width(width);
 
     let mut script = String::new();
     script_info(&mut script, width, height);
-    style_block(&mut script, theme, scale);
+    style_block(&mut script, theme, scale, font_size);
     if !fonts_dir.as_os_str().is_empty() {
         fonts_section(&mut script, fonts_dir);
     }
     events_header(&mut script);
     for segment in segments {
-        dialogue(&mut script, segment, theme);
+        dialogue(
+            &mut script,
+            segment,
+            theme,
+            &measurer,
+            font_size,
+            card_width,
+        );
     }
     Ok(script)
+}
+
+/// Theme font size at the script's resolution.
+fn scaled_font_size(theme: &ThemeStyle, scale: f32) -> u32 {
+    (theme.font_size as f32 * scale).round().max(1.0) as u32
 }
 
 /// `[Script Info]` block.
@@ -80,8 +101,7 @@ fn script_info(out: &mut String, width: u32, height: u32) {
 /// The secondary colour carries the karaoke fill; the back colour carries the
 /// shadow (and the outline colour when no shadow is used, which keeps the
 /// border solid for the pop animations).
-fn style_block(out: &mut String, theme: &ThemeStyle, scale: f32) {
-    let font_size = (theme.font_size as f32 * scale).round().max(1.0) as u32;
+fn style_block(out: &mut String, theme: &ThemeStyle, scale: f32, font_size: u32) {
     let outline = theme.outline_width * scale;
     let shadow = theme.shadow * scale;
     let margin_v = (theme.margin_v as f32 * scale).round() as u32;
@@ -117,24 +137,59 @@ fn events_header(out: &mut String) {
     );
 }
 
-/// Appends one `Dialogue` line for `segment`.
-fn dialogue(out: &mut String, segment: &CaptionSegment, theme: &ThemeStyle) {
+/// Appends one `Dialogue` line for `segment`, shrinking the font when the card
+/// would overflow the frame.
+fn dialogue(
+    out: &mut String,
+    segment: &CaptionSegment,
+    theme: &ThemeStyle,
+    measurer: &Measurer<'_>,
+    font_size: u32,
+    card_width: f32,
+) {
     let Some(first) = segment.start_ms() else {
         return;
     };
     let end = segment.end_ms().unwrap_or(first).max(first);
+    let fitted = measurer.fitted_font_size(&card_text(segment, theme), font_size, card_width);
     out.push_str(&format!(
         "Dialogue: 0,{start},{end},{STYLE_NAME},,0,0,0,,{text}\n",
         start = ass_time(first),
         end = ass_time(end),
-        text = dialogue_text(segment, theme),
+        text = dialogue_text(segment, theme, fitted, font_size),
     ));
 }
 
+/// The card's visible text, used for width measurement.
+fn card_text(segment: &CaptionSegment, theme: &ThemeStyle) -> String {
+    let mut text = String::new();
+    for word in &segment.words {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        if theme.uppercase {
+            text.push_str(&word.text.to_uppercase());
+        } else {
+            text.push_str(&word.text);
+        }
+    }
+    text
+}
+
 /// Builds the animated text of one card.
-fn dialogue_text(segment: &CaptionSegment, theme: &ThemeStyle) -> String {
+fn dialogue_text(
+    segment: &CaptionSegment,
+    theme: &ThemeStyle,
+    fitted_size: u32,
+    font_size: u32,
+) -> String {
     let line_start = segment.start_ms().unwrap_or(0);
     let mut out = String::new();
+    // One override before the first word scales the whole card; the per-word
+    // animation tags stay relative to whatever size is current.
+    if fitted_size < font_size {
+        out.push_str(&format!("{{\\fs{fitted_size}}}"));
+    }
     for word in &segment.words {
         match theme.animation {
             AnimationType::None => out.push_str(&word_text(word, theme)),
@@ -442,6 +497,46 @@ mod tests {
         )
         .unwrap();
         assert!(script.contains("a\\{b\\} \\\\c"));
+    }
+
+    #[test]
+    fn long_cards_shrink_to_fit_the_frame() {
+        let theme = themes::tiktok_classic();
+        let script = build_ass_script(
+            &[segment(&["Whos", "hoo", "gold", "number", "one"])],
+            &theme,
+            &metadata(1080, 1920),
+            Path::new(""),
+        )
+        .unwrap();
+        let line = script
+            .lines()
+            .find(|line| line.starts_with("Dialogue:"))
+            .expect("dialogue line");
+        let (_, text) = line.rsplit_once(",,").unwrap();
+        // The style font is 72 * 1920/1080 = 128; the card is too wide for the
+        // 1080 px frame and must carry a smaller `\fs` override.
+        assert!(text.starts_with("{\\fs"), "{text}");
+        let size: u32 = text[4..].split('}').next().unwrap().parse().unwrap();
+        assert!((16..128).contains(&size), "fitted to {size}");
+    }
+
+    #[test]
+    fn short_cards_keep_the_style_font_size() {
+        let theme = themes::tiktok_classic();
+        let script = build_ass_script(
+            &[segment(&["Yes"])],
+            &theme,
+            &metadata(1080, 1920),
+            Path::new(""),
+        )
+        .unwrap();
+        let line = script
+            .lines()
+            .find(|line| line.starts_with("Dialogue:"))
+            .unwrap();
+        let (_, text) = line.rsplit_once(",,").unwrap();
+        assert!(!text.starts_with("{\\fs"), "{text}");
     }
 
     #[test]

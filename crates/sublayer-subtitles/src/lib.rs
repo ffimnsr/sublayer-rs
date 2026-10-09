@@ -8,6 +8,7 @@
 pub mod ass;
 pub mod error;
 pub mod fonts;
+mod metrics;
 pub mod segmenter;
 pub mod srt_vtt;
 pub mod themes;

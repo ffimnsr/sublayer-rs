@@ -13,6 +13,7 @@ sublayer-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+ttf-parser = "0.25"
 
 [lints]
 workspace = true
