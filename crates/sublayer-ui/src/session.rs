@@ -53,12 +53,17 @@ impl DragMode {
 }
 
 /// Bounds captured when a drag gesture starts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `pointer_start_x` is the pointer's window position at press time. Measuring
+/// against it (instead of the item-relative press point) keeps the gesture
+/// correct even though the card itself travels with the pointer.
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct DragState {
     index: usize,
     mode: DragMode,
     origin_start_ms: u64,
     origin_end_ms: u64,
+    pointer_start_x: f32,
 }
 
 /// Outcome of a finished preview decode.
@@ -264,7 +269,10 @@ impl Session {
     }
 
     /// Captures the bounds of the card a drag gesture will retime.
-    pub fn begin_drag(&mut self, index: usize, mode: DragMode) -> bool {
+    ///
+    /// `pointer_x` is the pointer's window position, used by [`Session::drag_to`]
+    /// to measure the gesture without the moving card disturbing the reading.
+    pub fn begin_drag(&mut self, index: usize, mode: DragMode, pointer_x: f32) -> bool {
         let Some(project) = self.project.as_ref() else {
             return false;
         };
@@ -276,12 +284,23 @@ impl Session {
             mode,
             origin_start_ms: segment_start(segment),
             origin_end_ms: segment_end(segment),
+            pointer_start_x: pointer_x,
         });
         self.selected = Some(index);
         true
     }
 
-    /// Applies a drag delta relative to the gesture origin.
+    /// Applies a drag that reached `pointer_x` in window coordinates.
+    ///
+    /// Returns the new bounds when the model changed.
+    pub fn drag_to(&mut self, pointer_x: f32) -> Option<(u64, u64)> {
+        let drag = self.drag?;
+        let delta_px = f64::from(pointer_x - drag.pointer_start_x);
+        let delta_ms = (delta_px / f64::from(self.pixels_per_second) * 1_000.0).round() as i64;
+        self.apply_drag(delta_ms)
+    }
+
+    /// Applies a drag delta relative to the gesture origin, in milliseconds.
     ///
     /// Cards may not overlap their neighbours and keep at least
     /// [`MIN_SEGMENT_MS`] of duration. Returns the new bounds when the model
@@ -618,7 +637,7 @@ mod tests {
     #[test]
     fn move_is_clamped_by_neighbours() {
         let mut session = session_with(&[(1_000, 2_000), (3_000, 4_000)]);
-        session.begin_drag(0, DragMode::Move);
+        session.begin_drag(0, DragMode::Move, 0.0);
         // Try to push the first card past the second one.
         assert_eq!(session.apply_drag(5_000).unwrap(), (2_000, 3_000));
     }
@@ -626,17 +645,17 @@ mod tests {
     #[test]
     fn move_stays_inside_the_document() {
         let mut session = session_with(&[(1_000, 2_000)]);
-        session.begin_drag(0, DragMode::Move);
+        session.begin_drag(0, DragMode::Move, 0.0);
         assert_eq!(session.apply_drag(-10_000).unwrap(), (0, 1_000));
 
-        session.begin_drag(0, DragMode::Move);
+        session.begin_drag(0, DragMode::Move, 0.0);
         assert_eq!(session.apply_drag(500_000).unwrap(), (29_000, 30_000));
     }
 
     #[test]
     fn trim_start_respects_minimum_duration() {
         let mut session = session_with(&[(1_000, 2_000)]);
-        session.begin_drag(0, DragMode::TrimStart);
+        session.begin_drag(0, DragMode::TrimStart, 0.0);
         let (start, end) = session.apply_drag(10_000).unwrap();
         assert_eq!(end, 2_000);
         assert_eq!(start, 2_000 - MIN_SEGMENT_MS);
@@ -645,23 +664,35 @@ mod tests {
     #[test]
     fn trim_end_respects_minimum_duration_and_neighbours() {
         let mut session = session_with(&[(1_000, 2_000), (3_000, 4_000)]);
-        session.begin_drag(0, DragMode::TrimEnd);
+        session.begin_drag(0, DragMode::TrimEnd, 0.0);
         let (start, end) = session.apply_drag(10_000).unwrap();
         assert_eq!(start, 1_000);
         assert_eq!(end, 3_000);
     }
 
     #[test]
+    fn drag_to_measures_pointer_travel() {
+        let mut session = session_with(&[(1_000, 2_000)]);
+        assert!(session.begin_drag(0, DragMode::Move, 500.0));
+        // 30 px at 60 px/s: half a second, regardless of the card following
+        // the pointer.
+        assert_eq!(session.drag_to(530.0), Some((1_500, 2_500)));
+        // A fresh gesture re-baselines from the current bounds.
+        assert!(session.begin_drag(0, DragMode::Move, 530.0));
+        assert_eq!(session.drag_to(560.0), Some((2_000, 3_000)));
+    }
+
+    #[test]
     fn drag_without_movement_reports_no_change() {
         let mut session = session_with(&[(1_000, 2_000)]);
-        session.begin_drag(0, DragMode::Move);
+        session.begin_drag(0, DragMode::Move, 0.0);
         assert!(session.apply_drag(0).is_none());
     }
 
     #[test]
     fn retimed_card_keeps_word_time_bounds() {
         let mut session = session_with(&[(1_000, 2_000)]);
-        session.begin_drag(0, DragMode::Move);
+        session.begin_drag(0, DragMode::Move, 0.0);
         session.apply_drag(500).unwrap();
         let (index, segment) = session.selected_segment().unwrap();
         assert_eq!(index, 0);
@@ -674,7 +705,7 @@ mod tests {
     #[test]
     fn trimming_an_end_keeps_words_ordered() {
         let mut session = session_with(&[(1_000, 3_000)]);
-        session.begin_drag(0, DragMode::TrimEnd);
+        session.begin_drag(0, DragMode::TrimEnd, 0.0);
         let (_, end) = session.apply_drag(-1_500).unwrap();
         assert_eq!(end, 1_500);
         let segment = &session.project.as_ref().unwrap().segments[0];

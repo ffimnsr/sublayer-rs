@@ -3,13 +3,56 @@
 //! Every function here is a one-way render of the session into one region of
 //! the window, so an event only refreshes the panels it actually changed.
 
-use slint::{Color, ModelRc, SharedString, VecModel};
+use std::rc::Rc;
+
+use slint::{Color, Model, ModelRc, SharedString, VecModel};
 use sublayer_core::{CaptionSegment, Rgba};
 use sublayer_subtitles::PRESET_NAMES;
 
-use crate::MainWindow;
 use crate::adapters;
 use crate::session::Session;
+use crate::{BucketItem, MainWindow, SegmentItem};
+
+/// Long-lived Slint models of the studio window.
+///
+/// Assigning a fresh model to a property rebuilds every repeated item. Keeping
+/// the instances stable and updating rows in place preserves the item the user
+/// is holding, which is what makes dragging a caption card work at all.
+pub(crate) struct UiModels {
+    /// Caption cards of the timeline track.
+    pub(crate) segments: Rc<VecModel<SegmentItem>>,
+    /// Aggregated waveform columns.
+    pub(crate) buckets: Rc<VecModel<BucketItem>>,
+}
+
+impl UiModels {
+    /// Creates the (empty) model instances.
+    pub(crate) fn new() -> Self {
+        Self {
+            segments: Rc::new(VecModel::default()),
+            buckets: Rc::new(VecModel::default()),
+        }
+    }
+
+    /// Installs the instances on the window; call once at startup.
+    pub(crate) fn attach(&self, ui: &MainWindow) {
+        ui.set_segments(ModelRc::new(self.segments.clone()));
+        ui.set_buckets(ModelRc::new(self.buckets.clone()));
+    }
+}
+
+/// Copies `items` into `model`, leaving unchanged rows (and their items) be.
+fn sync_rows<T: Clone + PartialEq + 'static>(model: &VecModel<T>, items: Vec<T>) {
+    if model.row_count() == items.len() {
+        for (index, item) in items.into_iter().enumerate() {
+            if model.row_data(index).as_ref() != Some(&item) {
+                model.set_row_data(index, item);
+            }
+        }
+    } else {
+        model.set_vec(items);
+    }
+}
 
 /// Fills the static option lists (models, presets, alignments, animations).
 pub(crate) fn install_static_options(ui: &MainWindow) {
@@ -80,12 +123,15 @@ pub(crate) fn refresh_theme(ui: &MainWindow, session: &Session) {
 }
 
 /// Pushes the caption cards and the inspector's text editor.
-pub(crate) fn refresh_segments(ui: &MainWindow, session: &Session) {
+pub(crate) fn refresh_segments(ui: &MainWindow, session: &Session, models: &UiModels) {
     let (segments, selected) = match session.project.as_ref() {
         Some(project) => (project.segments.as_slice(), session.selected),
         None => (&[][..] as &[CaptionSegment], None),
     };
-    ui.set_segments(adapters::segments_model(segments, selected));
+    sync_rows(
+        &models.segments,
+        adapters::segment_items(segments, selected),
+    );
     ui.set_has_selection(session.selected.is_some());
     match session.selected_segment() {
         Some((_, segment)) => {
@@ -124,7 +170,7 @@ pub(crate) fn refresh_playhead(ui: &MainWindow, session: &Session) {
 }
 
 /// Pushes zoom, scroll, and the waveform window.
-pub(crate) fn refresh_timeline(ui: &MainWindow, session: &Session) {
+pub(crate) fn refresh_timeline(ui: &MainWindow, session: &Session, models: &UiModels) {
     ui.set_scroll_ms(ui_ms(session.scroll_ms));
     ui.set_pixels_per_second(session.pixels_per_second);
 
@@ -137,7 +183,7 @@ pub(crate) fn refresh_timeline(ui: &MainWindow, session: &Session) {
         .unwrap_or_default();
     ui.set_column_base_ms(ui_ms(base_ms));
     ui.set_column_ms(ui_ms(column_ms));
-    ui.set_buckets(ModelRc::new(VecModel::from(buckets)));
+    sync_rows(&models.buckets, buckets);
 }
 
 /// Pushes the busy indicator and the status line.

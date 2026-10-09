@@ -19,8 +19,8 @@ use crate::bridge::{Bridge, TranscribeRequest, UiEvent, model_names};
 use crate::error::UiError;
 use crate::session::{DragMode, PreviewOutcome, Session};
 use crate::views::{
-    install_static_options, refresh_document, refresh_encoder, refresh_playhead, refresh_segments,
-    refresh_task, refresh_theme, refresh_timeline,
+    UiModels, install_static_options, refresh_document, refresh_encoder, refresh_playhead,
+    refresh_segments, refresh_task, refresh_theme, refresh_timeline,
 };
 use crate::{MainWindow, ThemeData};
 
@@ -52,6 +52,8 @@ pub struct App {
     _events: Receiver<UiEvent>,
     /// WAV, cache, and font paths for the session's lifetime.
     _media: Rc<MediaFiles>,
+    /// Stable model instances shared with the callbacks and refresh helpers.
+    models: Rc<UiModels>,
     /// Drives [`pump`]; stopped when the app is dropped.
     _timer: slint::Timer,
 }
@@ -72,7 +74,9 @@ impl App {
         });
 
         install_static_options(&ui);
-        wire_callbacks(&ui, &bridge, &session, &media);
+        let models = Rc::new(UiModels::new());
+        models.attach(&ui);
+        wire_callbacks(&ui, &bridge, &session, &models, &media);
         // Resolve the render encoder in the background; renders use it until
         // the user overrides via `SUBLAYER_ENCODER`.
         bridge.probe_render_encoder(EncoderPreference::default());
@@ -84,8 +88,9 @@ impl App {
             let session = Rc::clone(&session);
             let events = events.clone();
             let media = Rc::clone(&media);
+            let models = Rc::clone(&models);
             timer.start(slint::TimerMode::Repeated, PUMP_INTERVAL, move || {
-                pump(&weak, &bridge, &session, &events, &media)
+                pump(&weak, &bridge, &session, &models, &events, &media)
             });
         }
 
@@ -95,9 +100,10 @@ impl App {
             session,
             _events: events,
             _media: media,
+            models,
             _timer: timer,
         };
-        app.refresh_initial();
+        app.refresh();
         Ok(app)
     }
 
@@ -107,14 +113,27 @@ impl App {
         Ok(())
     }
 
-    /// Pushes the initial property values (models, labels, status).
-    fn refresh_initial(&self) {
+    /// Window handle, exposed so headless tests can drive real input events.
+    #[cfg(test)]
+    pub(crate) fn window(&self) -> &MainWindow {
+        &self.ui
+    }
+
+    /// Shared editor session, exposed so headless tests can inspect state.
+    #[cfg(test)]
+    pub(crate) fn session(&self) -> &Rc<RefCell<Session>> {
+        &self.session
+    }
+
+    /// Re-renders every panel from the current session state.
+    pub(crate) fn refresh(&self) {
         let session = self.session.borrow();
+        let models = &self.models;
         refresh_task(&self.ui, &session);
         refresh_document(&self.ui, &session);
-        refresh_segments(&self.ui, &session);
+        refresh_segments(&self.ui, &session, models);
         refresh_playhead(&self.ui, &session);
-        refresh_timeline(&self.ui, &session);
+        refresh_timeline(&self.ui, &session, models);
         refresh_encoder(&self.ui, &session);
     }
 }
@@ -124,8 +143,10 @@ fn wire_callbacks(
     ui: &MainWindow,
     bridge: &Bridge,
     session: &Rc<RefCell<Session>>,
+    models: &Rc<UiModels>,
     media: &Rc<MediaFiles>,
 ) {
+    let models = Rc::clone(models);
     // Owned clone: closures below must be `'static`, and `Bridge::clone`
     // deliberately does not carry the runtime ownership.
     let bridge = Bridge::clone(bridge);
@@ -289,6 +310,7 @@ fn wire_callbacks(
     {
         let session = Rc::clone(session);
         let weak = weak.clone();
+        let models = Rc::clone(&models);
         ui.on_scroll_requested(move |delta_x, delta_y, zoom| {
             let viewport_px = weak.upgrade().map_or(0.0, |ui| ui.get_timeline_pixels());
             let mut session = session.borrow_mut();
@@ -310,27 +332,30 @@ fn wire_callbacks(
                 session.scroll_by(delta_ms, viewport_px);
             }
             if let Some(ui) = weak.upgrade() {
-                refresh_timeline(&ui, &session);
+                refresh_timeline(&ui, &session, &models);
             }
         });
     }
     {
         let session = Rc::clone(session);
         let weak = weak.clone();
+        let models = Rc::clone(&models);
         ui.on_zoom_in_requested(move || {
-            zoom_step(&weak, &session, ZOOM_STEP);
+            zoom_step(&weak, &session, &models, ZOOM_STEP);
         });
     }
     {
         let session = Rc::clone(session);
         let weak = weak.clone();
+        let models = Rc::clone(&models);
         ui.on_zoom_out_requested(move || {
-            zoom_step(&weak, &session, 1.0 / ZOOM_STEP);
+            zoom_step(&weak, &session, &models, 1.0 / ZOOM_STEP);
         });
     }
     {
         let session = Rc::clone(session);
         let weak = weak.clone();
+        let models = Rc::clone(&models);
         ui.on_zoom_fit_requested(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -340,13 +365,14 @@ fn wire_callbacks(
                 let mut session = session.borrow_mut();
                 session.zoom_fit(viewport_px);
             }
-            refresh_timeline(&ui, &session.borrow());
+            refresh_timeline(&ui, &session.borrow(), &models);
         });
     }
     {
         let bridge = bridge.clone();
         let session = Rc::clone(session);
         let weak = weak.clone();
+        let models = Rc::clone(&models);
         ui.on_segment_selected(move |index| {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -364,43 +390,43 @@ fn wire_callbacks(
             }
             {
                 let session = session.borrow();
-                refresh_segments(&ui, &session);
+                refresh_segments(&ui, &session, &models);
                 refresh_playhead(&ui, &session);
-                refresh_timeline(&ui, &session);
+                refresh_timeline(&ui, &session, &models);
             }
             request_preview(&bridge, &session);
         });
     }
     {
         let session = Rc::clone(session);
-        ui.on_segment_drag_begin(move |index, mode| {
+        ui.on_segment_drag_begin(move |index, mode, pointer_x| {
             let Some(mode) = DragMode::from_code(mode) else {
                 return;
             };
-            session.borrow_mut().begin_drag(index.max(0) as usize, mode);
+            session
+                .borrow_mut()
+                .begin_drag(index.max(0) as usize, mode, pointer_x);
         });
     }
     {
         let session = Rc::clone(session);
         let weak = weak.clone();
-        ui.on_segment_drag_move(move |_index, delta_px| {
-            let delta_ms = {
-                let session = session.borrow();
-                (f64::from(delta_px) / f64::from(session.pixels_per_second) * 1_000.0) as i64
-            };
-            let changed = session.borrow_mut().apply_drag(delta_ms).is_some();
+        let models = Rc::clone(&models);
+        ui.on_segment_drag_move(move |pointer_x| {
+            let changed = session.borrow_mut().drag_to(pointer_x).is_some();
             if changed && let Some(ui) = weak.upgrade() {
-                refresh_segments(&ui, &session.borrow());
+                refresh_segments(&ui, &session.borrow(), &models);
             }
         });
     }
     {
         let session = Rc::clone(session);
         let weak = weak.clone();
+        let models = Rc::clone(&models);
         ui.on_segment_drag_end(move || {
             session.borrow_mut().end_drag();
             if let Some(ui) = weak.upgrade() {
-                refresh_segments(&ui, &session.borrow());
+                refresh_segments(&ui, &session.borrow(), &models);
             }
         });
     }
@@ -433,6 +459,7 @@ fn wire_callbacks(
     {
         let session = Rc::clone(session);
         let weak = weak.clone();
+        let models = Rc::clone(&models);
         ui.on_caption_edited(move |text: SharedString| {
             let changed = {
                 let mut session = session.borrow_mut();
@@ -442,13 +469,14 @@ fn wire_callbacks(
                 session.set_segment_text(index, text.as_str())
             };
             if changed && let Some(ui) = weak.upgrade() {
-                refresh_segments(&ui, &session.borrow());
+                refresh_segments(&ui, &session.borrow(), &models);
             }
         });
     }
     {
         let session = Rc::clone(session);
         let weak = weak.clone();
+        let models = Rc::clone(&models);
         ui.on_delete_segment_requested(move || {
             let deleted = {
                 let mut session = session.borrow_mut();
@@ -458,7 +486,7 @@ fn wire_callbacks(
                 session.delete_segment(index)
             };
             if deleted && let Some(ui) = weak.upgrade() {
-                refresh_segments(&ui, &session.borrow());
+                refresh_segments(&ui, &session.borrow(), &models);
             }
         });
     }
@@ -469,6 +497,7 @@ fn pump(
     weak: &Weak<MainWindow>,
     bridge: &Bridge,
     session: &Rc<RefCell<Session>>,
+    models: &UiModels,
     events: &Receiver<UiEvent>,
     media: &Rc<MediaFiles>,
 ) {
@@ -476,7 +505,7 @@ fn pump(
         return;
     };
     while let Ok(event) = events.try_recv() {
-        handle_event(&ui, bridge, session, media, event);
+        handle_event(&ui, bridge, session, models, media, event);
     }
 }
 
@@ -485,6 +514,7 @@ fn handle_event(
     ui: &MainWindow,
     bridge: &Bridge,
     session: &Rc<RefCell<Session>>,
+    models: &UiModels,
     media: &Rc<MediaFiles>,
     event: UiEvent,
 ) {
@@ -562,14 +592,14 @@ fn handle_event(
             }
             refresh_document(ui, &session.borrow());
             refresh_theme(ui, &session.borrow());
-            refresh_segments(ui, &session.borrow());
+            refresh_segments(ui, &session.borrow(), models);
             refresh_playhead(ui, &session.borrow());
-            refresh_timeline(ui, &session.borrow());
+            refresh_timeline(ui, &session.borrow(), models);
             request_preview(bridge, session);
         }
         UiEvent::WaveformReady { cache } => {
             session.borrow_mut().waveform = Some(cache);
-            refresh_timeline(ui, &session.borrow());
+            refresh_timeline(ui, &session.borrow(), models);
         }
         UiEvent::WordsReady { segments } => {
             {
@@ -580,7 +610,7 @@ fn handle_event(
                 }
                 session.selected = None;
             }
-            refresh_segments(ui, &session.borrow());
+            refresh_segments(ui, &session.borrow(), models);
             refresh_playhead(ui, &session.borrow());
         }
         UiEvent::PreviewReady {
@@ -616,9 +646,9 @@ fn handle_event(
             }
             refresh_document(ui, &session.borrow());
             refresh_theme(ui, &session.borrow());
-            refresh_segments(ui, &session.borrow());
+            refresh_segments(ui, &session.borrow(), models);
             refresh_playhead(ui, &session.borrow());
-            refresh_timeline(ui, &session.borrow());
+            refresh_timeline(ui, &session.borrow(), models);
 
             if video_path.is_file() {
                 bridge.prepare_media(video_path, media.wav_path.clone(), media.cache_path.clone());
@@ -696,7 +726,12 @@ fn set_status(weak: &Weak<MainWindow>, session: &Rc<RefCell<Session>>, message: 
 }
 
 /// Zooms by `factor` around the playhead and refreshes the timeline.
-fn zoom_step(weak: &Weak<MainWindow>, session: &Rc<RefCell<Session>>, factor: f32) {
+fn zoom_step(
+    weak: &Weak<MainWindow>,
+    session: &Rc<RefCell<Session>>,
+    models: &UiModels,
+    factor: f32,
+) {
     let Some(ui) = weak.upgrade() else {
         return;
     };
@@ -705,7 +740,7 @@ fn zoom_step(weak: &Weak<MainWindow>, session: &Rc<RefCell<Session>>, factor: f3
         let mut session = session.borrow_mut();
         session.zoom_by(factor, viewport_px);
     }
-    refresh_timeline(&ui, &session.borrow());
+    refresh_timeline(&ui, &session.borrow(), models);
 }
 
 /// Default file name offered by the save/export dialogs.

@@ -26,8 +26,8 @@ export component Timeline inherits Rectangle {
     callback zoom-out-requested();
     callback zoom-fit-requested();
     callback segment-selected(index: int);
-    callback segment-drag-begin(index: int, mode: int);
-    callback segment-drag-move(index: int, delta-px: length);
+    callback segment-drag-begin(index: int, mode: int, pointer-x: length);
+    callback segment-drag-move(pointer-x: length);
     callback segment-drag-end();
 
     background: Palette.panel;
@@ -121,8 +121,8 @@ export component Timeline inherits Rectangle {
                     seeked(ms) => { root.seek(ms); }
                     wheeled(delta-x, delta-y, zoom) => { root.scroll-requested(delta-x, delta-y, zoom); }
                     select(index) => { root.segment-selected(index); }
-                    drag-begin(index, mode) => { root.segment-drag-begin(index, mode); }
-                    drag-move(index, delta-px) => { root.segment-drag-move(index, delta-px); }
+                    drag-begin(index, mode, pointer-x) => { root.segment-drag-begin(index, mode, pointer-x); }
+                    drag-move(pointer-x) => { root.segment-drag-move(pointer-x); }
                     drag-end() => { root.segment-drag-end(); }
                 }
             }

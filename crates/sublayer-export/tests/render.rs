@@ -175,6 +175,46 @@ async fn a_dropped_receiver_cancels_the_render() {
 }
 
 #[tokio::test]
+async fn renders_from_paths_with_filter_separators() {
+    let Some((mut options, fonts_dir)) = render_setup().await else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    // Colons, spaces, and apostrophes terminate or quote FFmpeg filter options;
+    // both the script and the fonts directory must survive them.
+    let odd = directory.path().join("od d: it's here");
+    std::fs::create_dir_all(&odd).unwrap();
+    let odd_fonts = odd.join("fonts");
+    std::fs::create_dir_all(&odd_fonts).unwrap();
+    let bundled = fonts_dir.join("Montserrat-ExtraBold.ttf");
+    let fonts_dir = if bundled.is_file() {
+        std::fs::copy(&bundled, odd_fonts.join("Montserrat-ExtraBold.ttf")).unwrap();
+        odd_fonts.clone()
+    } else {
+        fonts_dir
+    };
+
+    let video = odd.join("clip.mp4");
+    if let Err(error) = generate_clip(&video, 1).await {
+        eprintln!("skipping: could not create the test clip ({error})");
+        return;
+    }
+    let metadata = probe_video(&video).await.unwrap();
+    options.duration_ms = metadata.duration_ms();
+    let project = test_project(&video, metadata);
+    let output = odd.join("out.mp4");
+
+    let (progress_tx, mut progress_rx) = mpsc::channel(64);
+    let collector = tokio::spawn(async move { while progress_rx.recv().await.is_some() {} });
+    export_project(&project, &output, &fonts_dir, &options, progress_tx)
+        .await
+        .expect("a quoted path must render");
+    collector.await.unwrap();
+
+    assert!(std::fs::metadata(&output).unwrap().len() > 1_000);
+}
+
+#[tokio::test]
 async fn missing_input_is_reported_as_a_render_failure() {
     let Some((options, fonts_dir)) = render_setup().await else {
         return;

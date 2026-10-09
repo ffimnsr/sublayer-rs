@@ -3,7 +3,7 @@
 //! All formatting and clamping rules live here so the Slint files stay
 //! declarative and the values pushed into them are always in range.
 
-use slint::{Image, ModelRc, SharedPixelBuffer, SharedString, VecModel};
+use slint::{Image, SharedPixelBuffer, SharedString};
 use sublayer_core::{AnimationType, CaptionSegment, Project, Rgba, ThemeStyle};
 use sublayer_media::{RgbaFrame, WaveformCache};
 use sublayer_subtitles::PRESET_NAMES;
@@ -101,12 +101,9 @@ pub fn parse_color(text: &str) -> Option<Rgba> {
     Rgba::from_hex(text.trim()).ok()
 }
 
-/// Builds the timeline model of caption cards.
-pub fn segments_model(
-    segments: &[CaptionSegment],
-    selected: Option<usize>,
-) -> ModelRc<SegmentItem> {
-    let items: Vec<SegmentItem> = segments
+/// Builds the timeline rows of caption cards.
+pub fn segment_items(segments: &[CaptionSegment], selected: Option<usize>) -> Vec<SegmentItem> {
+    segments
         .iter()
         .enumerate()
         .map(|(index, segment)| SegmentItem {
@@ -116,8 +113,7 @@ pub fn segments_model(
             text: segment.text().into(),
             selected: selected == Some(index),
         })
-        .collect();
-    ModelRc::new(VecModel::from(items))
+        .collect()
 }
 
 /// Aggregates `cache` into at most `columns` render columns starting at
@@ -234,7 +230,6 @@ fn clamp_ms(ms: u64) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use slint::Model;
     use sublayer_core::{VideoMetadata, WordToken};
     use sublayer_media::WaveformBucket;
 
@@ -298,17 +293,15 @@ mod tests {
     }
 
     #[test]
-    fn segments_model_marks_the_selection() {
+    fn segment_items_mark_the_selection() {
         let segments = vec![segment(0, 500, "hello"), segment(600, 900, "world")];
-        let model = segments_model(&segments, Some(1));
-        assert_eq!(model.row_count(), 2);
-        let first = model.row_data(0).unwrap();
-        let second = model.row_data(1).unwrap();
-        assert_eq!(first.text, "hello");
-        assert!(!first.selected);
-        assert_eq!(second.text, "world");
-        assert!(second.selected);
-        assert_eq!((second.start_ms, second.end_ms), (600, 900));
+        let items = segment_items(&segments, Some(1));
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].text, "hello");
+        assert!(!items[0].selected);
+        assert_eq!(items[1].text, "world");
+        assert!(items[1].selected);
+        assert_eq!((items[1].start_ms, items[1].end_ms), (600, 900));
     }
 
     #[test]

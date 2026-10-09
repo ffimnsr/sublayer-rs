@@ -95,8 +95,8 @@ export component MainWindow inherits Window {
     callback zoom-out-requested();
     callback zoom-fit-requested();
     callback segment-selected(index: int);
-    callback segment-drag-begin(index: int, mode: int);
-    callback segment-drag-move(index: int, delta-px: length);
+    callback segment-drag-begin(index: int, mode: int, pointer-x: length);
+    callback segment-drag-move(pointer-x: length);
     callback segment-drag-end();
 
     // Inspector intents.
@@ -131,7 +131,7 @@ export component MainWindow inherits Window {
             }
         }
 
-        content := HorizontalLayout {
+        HorizontalLayout {
             vertical-stretch: 1;
             padding: 10px;
             spacing: 10px;
@@ -178,8 +178,8 @@ export component MainWindow inherits Window {
                     zoom-out-requested => { root.zoom-out-requested(); }
                     zoom-fit-requested => { root.zoom-fit-requested(); }
                     segment-selected(index) => { root.segment-selected(index); }
-                    segment-drag-begin(index, mode) => { root.segment-drag-begin(index, mode); }
-                    segment-drag-move(index, delta-px) => { root.segment-drag-move(index, delta-px); }
+                    segment-drag-begin(index, mode, pointer-x) => { root.segment-drag-begin(index, mode, pointer-x); }
+                    segment-drag-move(pointer-x) => { root.segment-drag-move(pointer-x); }
                     segment-drag-end => { root.segment-drag-end(); }
                 }
             }

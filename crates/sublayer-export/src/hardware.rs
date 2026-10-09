@@ -155,10 +155,11 @@ fn probe_from(
     render_node: Option<&Path>,
     nvidia_device: bool,
 ) -> HardwareProbe {
-    let vaapi = render_node.is_some() && encoder_list.contains("h264_vaapi");
+    let has_encoder = |name: &str| encoder_list.split_whitespace().any(|token| token == name);
+    let vaapi = render_node.is_some() && has_encoder("h264_vaapi");
     HardwareProbe {
         vaapi,
-        nvenc: nvidia_device && encoder_list.contains("h264_nvenc"),
+        nvenc: nvidia_device && has_encoder("h264_nvenc"),
         vaapi_device: if vaapi {
             render_node.map(Path::to_path_buf)
         } else {

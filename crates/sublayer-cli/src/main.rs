@@ -144,11 +144,25 @@ impl OutputFormat {
 
 #[tokio::main]
 async fn main() {
+    init_tracing();
     let cli = Cli::parse();
     if let Err(error) = run(cli).await {
         eprintln!("error: {error}");
         std::process::exit(1);
     }
+}
+
+/// Initializes diagnostics logging on stderr, keeping stdout machine-readable.
+///
+/// The default level is `warn`; `RUST_LOG=sublayer_media=debug` and friends
+/// turn on the engine crates' tracing output.
+fn init_tracing() {
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into());
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
 }
 
 /// Options forwarded from the `render` subcommand into the pipeline.

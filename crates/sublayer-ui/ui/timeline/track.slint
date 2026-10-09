@@ -23,9 +23,11 @@ export component Track inherits Rectangle {
     callback seeked(ms: int);
     callback wheeled(delta-x: length, delta-y: length, zoom: bool);
     callback select(index: int);
-    // `mode`: 0 = move, 1 = trim start, 2 = trim end.
-    callback drag-begin(index: int, mode: int);
-    callback drag-move(index: int, delta-px: length);
+    // `mode`: 0 = move, 1 = trim start, 2 = trim end. `pointer-x` is the
+    // pointer's window position: the card follows it, so an item-relative
+    // reading would shrink every gesture by half.
+    callback drag-begin(index: int, mode: int, pointer-x: length);
+    callback drag-move(pointer-x: length);
     callback drag-end();
 
     background: Palette.panel;
@@ -49,7 +51,7 @@ export component Track inherits Rectangle {
         }
     }
 
-    for segment[i] in root.segments : Rectangle {
+    for segment[i] in root.segments : caption-block := Rectangle {
         x: (segment.start-ms - root.scroll-ms) * root.px-per-ms;
         y: 5px;
         width: max(12px, (segment.end-ms - segment.start-ms) * root.px-per-ms);
@@ -75,11 +77,11 @@ export component Track inherits Rectangle {
             width: max(0px, parent.width - 12px);
             height: parent.height;
             mouse-cursor: move;
-            moved => { root.drag-move(segment.index, self.mouse-x - self.pressed-x); }
+            moved => { root.drag-move(self.absolute-position.x + self.mouse-x); }
             pointer-event(event) => {
                 if (event.kind == PointerEventKind.down) {
                     root.select(segment.index);
-                    root.drag-begin(segment.index, 0);
+                    root.drag-begin(segment.index, 0, self.absolute-position.x + self.mouse-x);
                 } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
                     root.drag-end();
                 }
@@ -95,11 +97,11 @@ export component Track inherits Rectangle {
             width: 6px;
             height: parent.height;
             mouse-cursor: col-resize;
-            moved => { root.drag-move(segment.index, self.mouse-x - self.pressed-x); }
+            moved => { root.drag-move(self.absolute-position.x + self.mouse-x); }
             pointer-event(event) => {
                 if (event.kind == PointerEventKind.down) {
                     root.select(segment.index);
-                    root.drag-begin(segment.index, 1);
+                    root.drag-begin(segment.index, 1, self.absolute-position.x + self.mouse-x);
                 } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
                     root.drag-end();
                 }
@@ -111,11 +113,11 @@ export component Track inherits Rectangle {
             width: 6px;
             height: parent.height;
             mouse-cursor: col-resize;
-            moved => { root.drag-move(segment.index, self.mouse-x - self.pressed-x); }
+            moved => { root.drag-move(self.absolute-position.x + self.mouse-x); }
             pointer-event(event) => {
                 if (event.kind == PointerEventKind.down) {
                     root.select(segment.index);
-                    root.drag-begin(segment.index, 2);
+                    root.drag-begin(segment.index, 2, self.absolute-position.x + self.mouse-x);
                 } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
                     root.drag-end();
                 }

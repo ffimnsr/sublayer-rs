@@ -115,6 +115,7 @@ pub async fn run_export(
     let tracker = ProgressTracker::new(options.duration_ms);
     let started = Instant::now();
     let mut cancelled = false;
+    let mut read_error = None;
 
     loop {
         match lines.next_line().await {
@@ -129,27 +130,35 @@ pub async fn run_export(
             }
             Ok(None) => break,
             Err(error) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Err(ExportError::Io(error));
+                read_error = Some(error);
+                break;
             }
         }
     }
 
-    if cancelled {
+    // Never leave a child or a helper task behind, whatever the outcome.
+    let status = if cancelled || read_error.is_some() {
         let _ = child.kill().await;
         let _ = child.wait().await;
-        return Err(ExportError::Cancelled);
-    }
-
-    let status = child.wait().await.map_err(|source| MediaError::Spawn {
-        binary: ffmpeg::FFMPEG,
-        source,
-    })?;
+        None
+    } else {
+        Some(child.wait().await.map_err(|source| MediaError::Spawn {
+            binary: ffmpeg::FFMPEG,
+            source,
+        })?)
+    };
     let stderr = match stderr_task {
         Some(task) => task.await.unwrap_or_default(),
         None => Vec::new(),
     };
+
+    if let Some(error) = read_error {
+        return Err(ExportError::Io(error));
+    }
+    if cancelled {
+        return Err(ExportError::Cancelled);
+    }
+    let status = status.expect("status is awaited whenever the read loop succeeded");
     if !status.success() {
         return Err(ffmpeg::failure(ffmpeg::FFMPEG, status, &stderr).into());
     }
