@@ -2,7 +2,7 @@
 #
 # Members are added as roadmap phases land (see PLAN.md §7). Phase 1 ships the
 # foundation and media crates; later phases append `sublayer-ai`,
-# `sublayer-subtitles`, `sublayer-export`, `sublayer-gui`, and `sublayer-cli`.
+# `sublayer-subtitles`, `sublayer-ui`, `sublayer-export`, and `sublayer-cli`.
 
 [workspace]
 resolver = "3"
@@ -12,6 +12,7 @@ members = [
     "crates/sublayer-ai",
     "crates/sublayer-whisper",
     "crates/sublayer-subtitles",
+    "crates/sublayer-ui",
     "crates/sublayer-cli",
 ]
 
@@ -30,6 +31,7 @@ sublayer-media = { path = "crates/sublayer-media" }
 sublayer-ai = { path = "crates/sublayer-ai" }
 sublayer-whisper = { path = "crates/sublayer-whisper" }
 sublayer-subtitles = { path = "crates/sublayer-subtitles" }
+sublayer-ui = { path = "crates/sublayer-ui" }
 sublayer-cli = { path = "crates/sublayer-cli" }
 
 # Serialization & identity.
@@ -56,6 +58,15 @@ sha2 = "0.11"
 # Subtitles & CLI.
 clap = { version = "4.5", features = ["derive"] }
 indicatif = "0.18"
+
+# Desktop UI (Slint) & cross-thread plumbing.
+# Slint's default desktop feature set: winit backend (Wayland & X11) with the
+# OpenGL and software renderers.
+slint = "1.18"
+slint-build = "1.18"
+crossbeam-channel = "0.5"
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [workspace.lints.rust]
 # deny by default so every `unsafe` needs an explicit, reviewable `allow`;

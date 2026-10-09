@@ -1,0 +1,79 @@
+// Millisecond ruler with major (labelled) and minor ticks.
+//
+// The tick grid is derived from the current zoom so labels never collide; the
+// caller supplies the visible window through `scroll-ms` and `viewport-ms`.
+
+import { Format, Palette } from "../theme.slint";
+
+export component Ruler inherits Rectangle {
+    in property <int> scroll-ms: 0;
+    // Time at the right edge of the visible window.
+    in property <int> viewport-ms: 10000;
+    in property <float> pixels-per-second: 50;
+
+    callback seeked(ms: int);
+    callback wheeled(delta-x: length, delta-y: length, zoom: bool);
+
+    background: Palette.panel-alt;
+    clip: true;
+
+    property <length> px-per-ms: root.pixels-per-second / 1000 * 1px;
+
+    // Major spacing that keeps labels at least ~64px apart.
+    function tick-step-ms(pps: float) -> int {
+        return pps >= 240 ? 100
+            : pps >= 120 ? 250
+            : pps >= 60 ? 500
+            : pps >= 30 ? 1000
+            : pps >= 15 ? 2000
+            : pps >= 8 ? 5000
+            : pps >= 4 ? 10000
+            : 30000;
+    }
+
+    property <int> major-step: root.tick-step-ms(root.pixels-per-second);
+    property <int> first-major-ms: (root.scroll-ms / root.major-step) * root.major-step;
+    property <int> major-count: max(1, (root.viewport-ms - root.first-major-ms) / root.major-step + 2);
+    property <int> minor-step: max(1, root.major-step / 5);
+    property <int> first-minor-ms: (root.scroll-ms / root.minor-step) * root.minor-step;
+    property <int> minor-count: max(1, (root.viewport-ms - root.first-minor-ms) / root.minor-step + 2);
+
+    for marker[i] in root.minor-count : Rectangle {
+        x: (root.first-minor-ms + i * root.minor-step - root.scroll-ms) * root.px-per-ms;
+        y: parent.height - 6px;
+        width: 1px;
+        height: 6px;
+        background: Palette.border;
+    }
+
+    for marker[i] in root.major-count : Rectangle {
+        x: (root.first-major-ms + i * root.major-step - root.scroll-ms) * root.px-per-ms;
+        y: 0;
+        width: 1px;
+        height: parent.height;
+        background: Palette.border;
+
+        Text {
+            text: Format.clock(root.first-major-ms + i * root.major-step);
+            color: Palette.text-dim;
+            font-size: 10px;
+            x: 5px;
+            y: 3px;
+            vertical-alignment: top;
+        }
+    }
+
+    TouchArea {
+        mouse-cursor: crosshair;
+        moved => { root.seeked(Math.round(root.scroll-ms + self.mouse-x / root.px-per-ms)); }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.seeked(Math.round(root.scroll-ms + self.mouse-x / root.px-per-ms));
+            }
+        }
+        scroll-event(event) => {
+            root.wheeled(event.delta-x, event.delta-y, event.modifiers.control);
+            return accept;
+        }
+    }
+}

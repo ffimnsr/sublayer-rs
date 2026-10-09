@@ -38,6 +38,32 @@ pub enum MediaError {
     #[error("input `{0}` contains no usable audio stream")]
     NoAudioStream(PathBuf),
 
+    /// No frame could be decoded at the requested position (typically past the
+    /// end of the stream).
+    #[error("no video frame could be decoded at {timestamp_ms} ms")]
+    NoVideoFrame {
+        /// Requested position in milliseconds.
+        timestamp_ms: u64,
+    },
+
+    /// The raw decoder produced an unexpected number of bytes.
+    #[error("decoded frame data has {actual} bytes, expected {expected}")]
+    InvalidFrameData {
+        /// Byte count implied by the requested frame size.
+        expected: usize,
+        /// Byte count actually read from the decoder.
+        actual: usize,
+    },
+
+    /// An operation exceeded its deadline; the child process was killed.
+    #[error("{operation} timed out after {seconds}s")]
+    Timeout {
+        /// Human-readable operation name.
+        operation: &'static str,
+        /// Configured deadline in whole seconds.
+        seconds: u64,
+    },
+
     /// Extraction succeeded but produced a header-only WAV.
     #[error("audio extraction from `{input}` produced no samples")]
     EmptyAudioOutput {

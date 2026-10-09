@@ -1,0 +1,38 @@
+[package]
+name = "sublayer-ui"
+description = "Slint desktop caption studio for Sublayer"
+version.workspace = true
+edition.workspace = true
+# Slint 1.18 requires a newer toolchain than the rest of the workspace.
+rust-version = "1.92"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "sublayer-ui"
+path = "src/main.rs"
+
+[dependencies]
+sublayer-core.workspace = true
+sublayer-media.workspace = true
+sublayer-ai.workspace = true
+sublayer-subtitles.workspace = true
+slint.workspace = true
+crossbeam-channel.workspace = true
+rfd.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true
+
+[dev-dependencies]
+# Headless platform for instantiating the window in tests.
+i-slint-backend-testing = "1.18"
+
+[lints]
+workspace = true

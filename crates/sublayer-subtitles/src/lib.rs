@@ -7,12 +7,14 @@
 
 pub mod ass;
 pub mod error;
+pub mod fonts;
 pub mod segmenter;
 pub mod srt_vtt;
 pub mod themes;
 
 pub use ass::build_ass_script;
 pub use error::SubtitleError;
+pub use fonts::{FONTS_DIR_ENV, resolve_fonts_dir};
 pub use segmenter::{SegmenterConfig, segment_words};
 pub use srt_vtt::{build_srt, build_vtt};
 pub use themes::{PRESET_NAMES, from_json, preset, preset_names, to_json};

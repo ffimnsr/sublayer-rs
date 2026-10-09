@@ -1,0 +1,84 @@
+// RMS waveform lane.
+//
+// `buckets` is a window of pre-aggregated columns produced by the Rust side
+// for the currently visible time range: `base-ms` is the time of the first
+// column and `column-ms` its width, so zooming and scrolling only rebuild the
+// model instead of resampling on every frame.
+
+import { Palette } from "../theme.slint";
+
+// One aggregated waveform column. Amplitudes are positive magnitudes in
+// `0.0..=1.0`; `low`/`high` are the negative/positive excursions.
+export struct BucketItem {
+    low: float,
+    high: float,
+    rms: float,
+}
+
+export component Waveform inherits Rectangle {
+    in property <[BucketItem]> buckets: [];
+    in property <int> base-ms: 0;
+    in property <int> column-ms: 100;
+    in property <int> scroll-ms: 0;
+    in property <float> pixels-per-second: 50;
+
+    callback seeked(ms: int);
+    callback wheeled(delta-x: length, delta-y: length, zoom: bool);
+
+    background: Palette.panel;
+    clip: true;
+
+    property <length> px-per-ms: root.pixels-per-second / 1000 * 1px;
+    property <length> column-width: max(1px, root.column-ms * root.px-per-ms);
+    property <length> origin-x: (root.base-ms - root.scroll-ms) * root.px-per-ms;
+
+    // Zero line.
+    Rectangle {
+        x: 0;
+        y: parent.height / 2;
+        width: parent.width;
+        height: 1px;
+        background: Palette.border;
+        opacity: 0.5;
+    }
+
+    for bucket[i] in root.buckets : Rectangle {
+        x: root.origin-x + i * root.column-width;
+        width: root.column-width;
+        height: parent.height;
+        property <float> peak: max(bucket.low, bucket.high);
+
+        // Peak excursion of the column.
+        Rectangle {
+            x: 0;
+            y: (parent.height - self.height) / 2;
+            width: parent.width;
+            height: max(1px, parent.peak * parent.height);
+            background: Palette.waveform;
+            opacity: 0.75;
+        }
+
+        // Perceived loudness.
+        Rectangle {
+            x: 0;
+            y: (parent.height - self.height) / 2;
+            width: parent.width;
+            height: max(1px, bucket.rms * parent.height);
+            background: Palette.waveform-rms;
+        }
+    }
+
+    TouchArea {
+        mouse-cursor: crosshair;
+        moved => { root.seeked(Math.round(root.scroll-ms + self.mouse-x / root.px-per-ms)); }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.seeked(Math.round(root.scroll-ms + self.mouse-x / root.px-per-ms));
+            }
+        }
+        scroll-event(event) => {
+            root.wheeled(event.delta-x, event.delta-y, event.modifiers.control);
+            return accept;
+        }
+    }
+}

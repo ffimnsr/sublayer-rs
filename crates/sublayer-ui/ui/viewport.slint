@@ -1,0 +1,105 @@
+// Video frame preview with a theme-accurate caption overlay.
+//
+// Frames arrive as `slint::Image` buffers produced from decoded RGBA previews;
+// the caption is drawn as native text so no video or overlay library is needed
+// on either Wayland or X11.
+
+import { Palette } from "theme.slint";
+
+export component Viewport inherits Rectangle {
+    in property <image> frame;
+    in property <bool> has-frame: false;
+    in property <int> video-width: 0;
+    in property <int> video-height: 0;
+    in property <string> caption: "";
+    in property <bool> show-caption: false;
+    in property <string> timecode: "00:00.000";
+    in property <string> placeholder: "Open a video to begin";
+    // Theme values, applied approximately on the letterboxed preview.
+    in property <int> font-size: 64;
+    in property <color> primary-color: white;
+    in property <color> outline-color: black;
+    in property <length> outline-width: 4px;
+    in property <bool> bold: true;
+    in property <bool> uppercase: true;
+    in property <int> margin-v: 320;
+
+    background: #05060a;
+    border-radius: Palette.radius-lg;
+    clip: true;
+
+    property <float> fit-scale: min(
+        (root.width / 1px) / max(1, root.video-width),
+        (root.height / 1px) / max(1, root.video-height)
+    );
+    property <length> frame-width: root.video-width * root.fit-scale * 1px;
+    property <length> frame-height: root.video-height * root.fit-scale * 1px;
+
+    preview := Image {
+        source: root.frame;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: root.frame-width;
+        height: root.frame-height;
+        image-fit: contain;
+    }
+
+    // Caption overlay, aligned inside the fitted frame (bottom-center, like
+    // the ASS renderer's margin-V).
+    if (root.has-frame && root.show-caption && root.caption != "") : Text {
+        text: root.uppercase ? root.caption.to-uppercase() : root.caption;
+        x: preview.x + root.frame-width * 0.04;
+        width: root.frame-width * 0.92;
+        y: preview.y + root.frame-height - self.height - (root.margin-v * root.fit-scale * 1px);
+        color: root.primary-color;
+        // A zero-width stroke still draws a hairline; hide the stroke there.
+        stroke: root.outline-width > 0px ? root.outline-color : transparent;
+        stroke-width: root.outline-width * root.fit-scale;
+        font-size: root.font-size * root.fit-scale * 1px;
+        font-weight: root.bold ? 800 : 400;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+
+    // Playhead timecode chip.
+    Rectangle {
+        visible: root.has-frame;
+        x: 12px;
+        y: 12px;
+        width: 86px;
+        height: 24px;
+        border-radius: Palette.radius;
+        background: #000000a8;
+
+        Text {
+            text: root.timecode;
+            color: Palette.text;
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            width: 100%;
+            height: 100%;
+        }
+    }
+
+    VerticalLayout {
+        visible: !root.has-frame;
+        alignment: center;
+        spacing: 4px;
+
+        Text {
+            text: "PREVIEW";
+            color: Palette.text-dim;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 2px;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: root.placeholder;
+            color: Palette.text;
+            font-size: 14px;
+            horizontal-alignment: center;
+        }
+    }
+}

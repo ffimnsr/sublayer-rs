@@ -1,0 +1,164 @@
+// Top action bar: project actions, video picker, transcription settings, and
+// the running-task indicator.
+
+import { Palette, ToolButton } from "theme.slint";
+import { ComboBox, LineEdit, ProgressIndicator, Switch } from "std-widgets.slint";
+
+export component Header inherits Rectangle {
+    in property <string> project-name: "Untitled project";
+    in-out property <string> video-path: "";
+    in property <bool> has-project: false;
+    in property <bool> busy: false;
+    in property <float> task-progress: 0.0;
+    in property <[string]> model-names: [];
+    in property <int> model-index: 0;
+    in property <bool> use-gpu: false;
+    in property <bool> use-vad: true;
+
+    callback browse-requested();
+    callback open-video(path: string);
+    callback open-project-requested();
+    callback save-requested();
+    callback save-as-requested();
+    callback export-requested();
+    callback transcribe-requested();
+    callback settings-changed(model-index: int, use-gpu: bool, use-vad: bool);
+
+    height: 102px;
+    background: Palette.panel;
+
+    // Bottom hairline separator (per-side borders are not supported).
+    Rectangle {
+        y: parent.height - 1px;
+        width: parent.width;
+        height: 1px;
+        background: Palette.border;
+    }
+
+    VerticalLayout {
+        padding-top: 10px;
+        padding-bottom: 10px;
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 9px;
+
+        // Row 1: brand, project identity, project-level actions.
+        HorizontalLayout {
+            spacing: 8px;
+
+            Text {
+                text: "SUBlayer";
+                color: Palette.accent;
+                font-size: 17px;
+                font-weight: 800;
+                letter-spacing: 0.4px;
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.project-name;
+                color: Palette.text-dim;
+                font-size: 13px;
+                vertical-alignment: center;
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            ToolButton {
+                text: "Open Project";
+                clicked => { root.open-project-requested(); }
+            }
+            ToolButton {
+                text: "Save";
+                enabled: root.has-project;
+                clicked => { root.save-requested(); }
+            }
+            ToolButton {
+                text: "Save As…";
+                enabled: root.has-project;
+                clicked => { root.save-as-requested(); }
+            }
+            ToolButton {
+                text: "Export ASS";
+                enabled: root.has-project;
+                clicked => { root.export-requested(); }
+            }
+        }
+
+        // Row 2: source file, transcription settings, primary action.
+        HorizontalLayout {
+            spacing: 8px;
+
+            LineEdit {
+                horizontal-stretch: 1;
+                placeholder-text: "Path to a video file…";
+                text <=> root.video-path;
+                accepted(text) => { root.open-video(text); }
+            }
+            ToolButton {
+                text: "Browse…";
+                enabled: !root.busy;
+                clicked => { root.browse-requested(); }
+            }
+            ToolButton {
+                text: "Open Video";
+                filled: true;
+                enabled: !root.busy && root.video-path != "";
+                clicked => { root.open-video(root.video-path); }
+            }
+
+            Rectangle {
+                width: 1px;
+                height: 20px;
+                background: Palette.border;
+            }
+
+            Text {
+                text: "Model";
+                color: Palette.text-dim;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            ComboBox {
+                width: 116px;
+                model: root.model-names;
+                current-index: root.model-index;
+                enabled: !root.busy;
+                selected(value) => {
+                    root.settings-changed(self.current-index, root.use-gpu, root.use-vad);
+                }
+            }
+            Switch {
+                text: "GPU";
+                checked: root.use-gpu;
+                enabled: !root.busy;
+                toggled => {
+                    root.settings-changed(root.model-index, self.checked, root.use-vad);
+                }
+            }
+            Switch {
+                text: "VAD";
+                checked: root.use-vad;
+                enabled: !root.busy;
+                toggled => {
+                    root.settings-changed(root.model-index, root.use-gpu, self.checked);
+                }
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            ProgressIndicator {
+                visible: root.busy;
+                width: 130px;
+                height: 8px;
+                progress: root.task-progress;
+                indeterminate: root.busy && root.task-progress <= 0.0;
+            }
+            ToolButton {
+                text: root.busy ? "Working…" : "Transcribe";
+                filled: true;
+                enabled: root.has-project && !root.busy;
+                clicked => { root.transcribe-requested(); }
+            }
+        }
+    }
+}

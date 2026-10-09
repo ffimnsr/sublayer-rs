@@ -1,5 +1,5 @@
 //! Media foundation for Sublayer: FFprobe metadata, Whisper-ready audio
-//! extraction, and timeline waveform caches.
+//! extraction, timeline waveform caches, and single-frame video previews.
 //!
 //! Every external invocation goes through the private `ffmpeg` helpers, which
 //! locate the executables on `PATH` (or via `SUBLAYER_FFMPEG` /
@@ -8,11 +8,13 @@
 pub mod audio;
 pub mod error;
 mod ffmpeg;
+pub mod preview;
 pub mod probe;
 pub mod waveform;
 
 pub use audio::{WHISPER_SAMPLE_RATE, extract_audio_16k};
 pub use error::MediaError;
+pub use preview::{DEFAULT_MAX_DIMENSION, PreviewConfig, RgbaFrame, decode_frame_at};
 pub use probe::probe_video;
 pub use waveform::{
     DEFAULT_BUCKETS_PER_SEC, WaveformBucket, WaveformCache, generate_waveform_cache,

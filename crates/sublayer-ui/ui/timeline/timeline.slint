@@ -1,0 +1,141 @@
+// Scrollable timeline: toolbar, ruler, waveform, caption track, and playhead.
+//
+// Zoom and scroll live in Rust; this container only renders the given window
+// and forwards pointer intents (`seek`, wheel, zoom buttons, block drags).
+
+import { Format, Palette, ToolButton } from "../theme.slint";
+import { Ruler } from "ruler.slint";
+import { BucketItem, Waveform } from "waveform.slint";
+import { SegmentItem, Track } from "track.slint";
+
+export component Timeline inherits Rectangle {
+    in property <int> duration-ms: 0;
+    in property <int> playhead-ms: 0;
+    in property <int> scroll-ms: 0;
+    in property <float> pixels-per-second: 50;
+    in property <bool> enabled: false;
+    // Waveform window handed over by the Rust side.
+    in property <[BucketItem]> buckets: [];
+    in property <int> column-base-ms: 0;
+    in property <int> column-ms: 100;
+    in property <[SegmentItem]> segments: [];
+
+    callback seek(ms: int);
+    callback scroll-requested(delta-x: length, delta-y: length, zoom: bool);
+    callback zoom-in-requested();
+    callback zoom-out-requested();
+    callback zoom-fit-requested();
+    callback segment-selected(index: int);
+    callback segment-drag-begin(index: int, mode: int);
+    callback segment-drag-move(index: int, delta-px: length);
+    callback segment-drag-end();
+
+    background: Palette.panel;
+    border-radius: Palette.radius-lg;
+
+    // Right edge of the visible window, used by the ruler for tick layout.
+    property <int> viewport-ms: root.scroll-ms + Math.round(lanes.width / root.px-per-ms);
+    property <length> px-per-ms: root.pixels-per-second / 1000 * 1px;
+    // Exact lane width, read by the app for zoom-fit and waveform windowing.
+    out property <length> lane-pixels: lanes.width;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 6px;
+
+        HorizontalLayout {
+            spacing: 8px;
+
+            Text {
+                text: root.enabled ? Format.timecode(root.playhead-ms) : "--:--.---";
+                color: Palette.text;
+                font-size: 13px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            Text {
+                text: root.enabled ? "duration " + Format.clock(root.duration-ms) : "no timeline";
+                color: Palette.text-dim;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            ToolButton {
+                text: "−";
+                enabled: root.enabled;
+                width: 32px;
+                clicked => { root.zoom-out-requested(); }
+            }
+            ToolButton {
+                text: "+";
+                enabled: root.enabled;
+                width: 32px;
+                clicked => { root.zoom-in-requested(); }
+            }
+            ToolButton {
+                text: "Fit";
+                enabled: root.enabled;
+                clicked => { root.zoom-fit-requested(); }
+            }
+        }
+
+        lanes := Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+
+            VerticalLayout {
+                spacing: 2px;
+
+                Ruler {
+                    height: 24px;
+                    horizontal-stretch: 1;
+                    scroll-ms: root.scroll-ms;
+                    viewport-ms: root.viewport-ms;
+                    pixels-per-second: root.pixels-per-second;
+                    seeked(ms) => { root.seek(ms); }
+                    wheeled(delta-x, delta-y, zoom) => { root.scroll-requested(delta-x, delta-y, zoom); }
+                }
+
+                Waveform {
+                    height: 62px;
+                    horizontal-stretch: 1;
+                    buckets: root.buckets;
+                    base-ms: root.column-base-ms;
+                    column-ms: root.column-ms;
+                    scroll-ms: root.scroll-ms;
+                    pixels-per-second: root.pixels-per-second;
+                    seeked(ms) => { root.seek(ms); }
+                    wheeled(delta-x, delta-y, zoom) => { root.scroll-requested(delta-x, delta-y, zoom); }
+                }
+
+                Track {
+                    vertical-stretch: 1;
+                    min-height: 40px;
+                    segments: root.segments;
+                    scroll-ms: root.scroll-ms;
+                    pixels-per-second: root.pixels-per-second;
+                    enabled: root.enabled;
+                    seeked(ms) => { root.seek(ms); }
+                    wheeled(delta-x, delta-y, zoom) => { root.scroll-requested(delta-x, delta-y, zoom); }
+                    select(index) => { root.segment-selected(index); }
+                    drag-begin(index, mode) => { root.segment-drag-begin(index, mode); }
+                    drag-move(index, delta-px) => { root.segment-drag-move(index, delta-px); }
+                    drag-end() => { root.segment-drag-end(); }
+                }
+            }
+
+            // Playhead, drawn across every lane.
+            Rectangle {
+                visible: root.enabled;
+                x: (root.playhead-ms - root.scroll-ms) * root.px-per-ms - 1px;
+                y: 0;
+                width: 2px;
+                height: parent.height;
+                background: Palette.accent;
+            }
+        }
+    }
+}

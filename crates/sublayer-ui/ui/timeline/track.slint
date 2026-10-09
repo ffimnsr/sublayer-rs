@@ -1,0 +1,125 @@
+// Caption cards lane.
+//
+// Blocks are positioned from the segment model. The body drags the whole card,
+// the edge handles trim its start/end; the Rust side owns the timing math and
+// clamps the result, so the UI only reports pointer deltas.
+
+import { Palette } from "../theme.slint";
+
+export struct SegmentItem {
+    index: int,
+    start-ms: int,
+    end-ms: int,
+    text: string,
+    selected: bool,
+}
+
+export component Track inherits Rectangle {
+    in property <[SegmentItem]> segments: [];
+    in property <int> scroll-ms: 0;
+    in property <float> pixels-per-second: 50;
+    in property <bool> enabled: true;
+
+    callback seeked(ms: int);
+    callback wheeled(delta-x: length, delta-y: length, zoom: bool);
+    callback select(index: int);
+    // `mode`: 0 = move, 1 = trim start, 2 = trim end.
+    callback drag-begin(index: int, mode: int);
+    callback drag-move(index: int, delta-px: length);
+    callback drag-end();
+
+    background: Palette.panel;
+    clip: true;
+
+    property <length> px-per-ms: root.pixels-per-second / 1000 * 1px;
+
+    // Clicking the empty lane moves the playhead; blocks are declared after
+    // this area and therefore sit on top of it.
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: crosshair;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.seeked(Math.round(root.scroll-ms + self.mouse-x / root.px-per-ms));
+            }
+        }
+        scroll-event(event) => {
+            root.wheeled(event.delta-x, event.delta-y, event.modifiers.control);
+            return accept;
+        }
+    }
+
+    for segment[i] in root.segments : Rectangle {
+        x: (segment.start-ms - root.scroll-ms) * root.px-per-ms;
+        y: 5px;
+        width: max(12px, (segment.end-ms - segment.start-ms) * root.px-per-ms);
+        height: parent.height - 10px;
+        border-radius: Palette.radius;
+        background: segment.selected ? Palette.selection : Palette.panel-alt;
+        border-width: 1px;
+        border-color: segment.selected ? Palette.accent : Palette.border;
+
+        Text {
+            text: segment.text;
+            color: Palette.text;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+            x: 8px;
+            width: max(0px, parent.width - 16px);
+            height: parent.height;
+        }
+
+        TouchArea {
+            x: 6px;
+            width: max(0px, parent.width - 12px);
+            height: parent.height;
+            mouse-cursor: move;
+            moved => { root.drag-move(segment.index, self.mouse-x - self.pressed-x); }
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    root.select(segment.index);
+                    root.drag-begin(segment.index, 0);
+                } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                    root.drag-end();
+                }
+            }
+            scroll-event(event) => {
+                root.wheeled(event.delta-x, event.delta-y, event.modifiers.control);
+                return accept;
+            }
+        }
+
+        TouchArea {
+            x: 0;
+            width: 6px;
+            height: parent.height;
+            mouse-cursor: col-resize;
+            moved => { root.drag-move(segment.index, self.mouse-x - self.pressed-x); }
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    root.select(segment.index);
+                    root.drag-begin(segment.index, 1);
+                } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                    root.drag-end();
+                }
+            }
+        }
+
+        TouchArea {
+            x: parent.width - 6px;
+            width: 6px;
+            height: parent.height;
+            mouse-cursor: col-resize;
+            moved => { root.drag-move(segment.index, self.mouse-x - self.pressed-x); }
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    root.select(segment.index);
+                    root.drag-begin(segment.index, 2);
+                } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                    root.drag-end();
+                }
+            }
+        }
+    }
+}

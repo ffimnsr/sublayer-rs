@@ -17,7 +17,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use sublayer_ai::{ModelManager, TranscriberConfig, transcribe_audio};
 use sublayer_core::{SublayerPaths, VideoMetadata};
 use sublayer_media::{extract_audio_16k, probe_video};
-use sublayer_subtitles::{build_ass_script, build_srt, build_vtt, preset, segment_words};
+use sublayer_subtitles::{
+    build_ass_script, build_srt, build_vtt, preset, resolve_fonts_dir, segment_words,
+};
 use tokio::sync::mpsc;
 
 use errors::CliError;
@@ -108,32 +110,6 @@ impl OutputFormat {
             other => Err(CliError::UnsupportedOutput(other.to_owned())),
         }
     }
-}
-
-/// Font directory passed to libass, resolved in order: `SUBLAYER_FONTS_DIR`,
-/// a bundled `assets/fonts` next to the working directory, and (for dev
-/// builds) the workspace `assets/fonts` relative to this crate's manifest.
-/// Deployments should set the environment variable.
-fn resolve_fonts_dir() -> PathBuf {
-    resolve_fonts_dir_from(std::env::var("SUBLAYER_FONTS_DIR").ok())
-}
-
-/// [`resolve_fonts_dir`] with the environment override injected, so tests can
-/// exercise the override without mutating process state.
-fn resolve_fonts_dir_from(env_override: Option<String>) -> PathBuf {
-    if let Some(dir) = env_override {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
-    }
-    let candidates = [
-        PathBuf::from("assets/fonts"),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts"),
-    ];
-    candidates
-        .into_iter()
-        .find(|dir| dir.is_dir())
-        .unwrap_or_default()
 }
 
 #[tokio::main]
@@ -422,23 +398,6 @@ mod tests {
             .unwrap();
         let result = rt.block_on(run(cli));
         assert!(matches!(result, Err(CliError::RenderDeferred)));
-    }
-
-    #[test]
-    fn fonts_dir_prefers_environment() {
-        assert_eq!(
-            resolve_fonts_dir_from(Some("/tmp/sublayer-fonts".to_owned())),
-            PathBuf::from("/tmp/sublayer-fonts")
-        );
-    }
-
-    #[test]
-    fn fonts_dir_falls_back_to_workspace_bundle() {
-        // No env override: the dev fallback resolves to the workspace
-        // `assets/fonts` directory, which exists in this tree.
-        let dir = resolve_fonts_dir_from(Some(String::new()));
-        assert!(dir.is_dir(), "{dir:?} should exist");
-        assert!(dir.ends_with("assets/fonts"));
     }
 
     #[tokio::test]

@@ -1,0 +1,109 @@
+// Shared visual language of the studio UI: the palette, time formatting, and
+// the small controls reused by every panel.
+
+export global Palette {
+    out property <color> bg: #0b0d12;
+    out property <color> panel: #12151d;
+    out property <color> panel-alt: #1a1f2b;
+    out property <color> raised: #232a39;
+    out property <color> border: #2b3446;
+    out property <color> text: #e9edf5;
+    out property <color> text-dim: #8b95ab;
+    out property <color> accent: #7c6cff;
+    out property <color> accent-hover: #9284ff;
+    out property <color> accent-soft: #7c6cff26;
+    out property <color> selection: #7c6cff59;
+    out property <color> danger: #ff5c6c;
+    out property <color> ok: #4fd1c5;
+    out property <color> waveform: #3fbfb1;
+    out property <color> waveform-rms: #9ceee6;
+    out property <length> radius: 6px;
+    out property <length> radius-lg: 10px;
+}
+
+export global Format {
+    public pure function two-digit(value: int) -> string {
+        return (value < 10 ? "0" : "") + value;
+    }
+
+    public pure function three-digit(value: int) -> string {
+        return (value < 10 ? "00" : (value < 100 ? "0" : "")) + value;
+    }
+
+    // `MM:SS.mmm`, the timecode shown next to the playhead.
+    public pure function timecode(ms: int) -> string {
+        return two-digit(ms / 60000)
+            + ":"
+            + two-digit(Math.mod(ms / 1000, 60))
+            + "."
+            + three-digit(Math.mod(ms, 1000));
+    }
+
+    // `M:SS`, compact labels for the ruler and duration readouts.
+    public pure function clock(ms: int) -> string {
+        return (ms / 60000) + ":" + two-digit(Math.mod(ms / 1000, 60));
+    }
+}
+
+// Flat toolbar-style button; `filled` promotes it to the primary action.
+export component ToolButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> filled: false;
+    in property <color> base-color: Palette.accent;
+    in property <color> text-color: root.filled ? #ffffff : Palette.text;
+    in property <length> button-height: 30px;
+    callback clicked;
+
+    height: button-height;
+    min-width: 34px;
+    border-radius: Palette.radius;
+    border-width: root.filled ? 0px : 1px;
+    border-color: Palette.border;
+    opacity: root.enabled ? 1.0 : 0.4;
+
+    background: !root.enabled ? Palette.panel
+        : root.filled ? (touch.has-hover ? Palette.accent-hover : root.base-color)
+        : (touch.has-hover ? Palette.raised : Palette.panel-alt);
+
+    animate background { duration: 90ms; }
+
+    label := Text {
+        text: root.text;
+        color: root.text-color;
+        font-size: 13px;
+        font-weight: root.filled ? 700 : 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        x: 10px;
+        width: parent.width - 20px;
+        height: parent.height;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Small uppercase group heading used by the inspector sections.
+export component SectionLabel inherits Text {
+    text: "SECTION";
+    color: Palette.text-dim;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.1px;
+    vertical-alignment: center;
+    height: 16px;
+}
+
+// Dimmed label for a control row in the inspector.
+export component FieldLabel inherits Text {
+    in property <length> field-width: 78px;
+    color: Palette.text-dim;
+    font-size: 12px;
+    vertical-alignment: center;
+    width: field-width;
+    height: 26px;
+}
