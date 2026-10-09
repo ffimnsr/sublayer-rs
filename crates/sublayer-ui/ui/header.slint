@@ -21,6 +21,7 @@ export component Header inherits Rectangle {
     callback save-requested();
     callback save-as-requested();
     callback export-requested();
+    callback export-video-requested();
     callback transcribe-requested();
     callback settings-changed(model-index: int, use-gpu: bool, use-vad: bool);
 
@@ -81,6 +82,12 @@ export component Header inherits Rectangle {
                 text: "Export ASS";
                 enabled: root.has-project;
                 clicked => { root.export-requested(); }
+            }
+            ToolButton {
+                text: "Export Video";
+                filled: true;
+                enabled: root.has-project && !root.busy;
+                clicked => { root.export-video-requested(); }
             }
         }
 

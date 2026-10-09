@@ -1,0 +1,73 @@
+# Flathub manifest for the Sublayer caption studio.
+#
+# Build with:
+#   flatpak-builder --user --install --force-clean build-dir \
+#       packaging/flatpak/com.sublayer.Sublayer.yml
+#
+# Notes:
+# * `--device=dri` exposes the DRM render nodes so `sublayer-export` can probe
+#   and use VA-API; without it the app silently renders on the CPU.
+# * `--socket=wayland` plus `--socket=fallback-x11` cover Wayland-first desktops
+#   and X11 sessions.
+# * The PipeWire socket is mounted for screen/audio portals used by the file
+#   dialogs and future preview capture.
+# * The Rust SDK extension builds the workspace; the build needs network access
+#   once to fetch the vendored crates and whisper.cpp sources.
+id: com.sublayer.Sublayer
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: sublayer-ui
+
+finish-args:
+  # Whisper model downloads from huggingface.co.
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # VA-API hardware encoding (Intel/AMD); NVENC needs the NVIDIA runtime.
+  - --device=dri
+  - --filesystem=xdg-run/pipewire-0
+  # Source videos and rendered output.
+  - --filesystem=xdg-videos
+  - --filesystem=xdg-download
+  # Native file dialogs (rfd speaks the XDG desktop portal).
+  - --talk-name=org.freedesktop.portal.Desktop
+  # Bundled caption fonts for libass.
+  - --env=SUBLAYER_FONTS_DIR=/app/share/sublayer/fonts
+
+add-extensions:
+  # Full FFmpeg with libx264/VA-API encoders; the base runtime ships a
+  # stripped-down build.
+  org.freedesktop.Platform.ffmpeg-full:
+    directory: lib/ffmpeg
+    version: '24.08'
+    add-ld-path: .
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/sublayer/cargo
+  build-args:
+    # Cargo needs the network to fetch the workspace dependencies.
+    - --share=network
+
+modules:
+  - name: sublayer
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --locked -p sublayer-ui -p sublayer-cli
+      - install -Dm755 target/release/sublayer-ui /app/bin/sublayer-ui
+      - install -Dm755 target/release/sublayer /app/bin/sublayer
+      - install -Dm644 packaging/sublayer.desktop /app/share/applications/com.sublayer.Sublayer.desktop
+      - install -Dm644 assets/icons/hicolor/scalable/apps/com.sublayer.Sublayer.svg /app/share/icons/hicolor/scalable/apps/com.sublayer.Sublayer.svg
+      # Bundled caption fonts, matched through SUBLAYER_FONTS_DIR.
+      - install -d /app/share/sublayer/fonts
+      - install -m644 assets/fonts/*.ttf /app/share/sublayer/fonts/
+      # Mount point for the ffmpeg-full extension.
+      - install -d /app/lib/ffmpeg
+    sources:
+      - type: dir
+        path: ../..

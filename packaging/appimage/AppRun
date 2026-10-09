@@ -1,0 +1,22 @@
+#!/bin/sh
+# AppRun entry point of the Sublayer AppImage.
+#
+# The AppImage layout places the workspace binaries under usr/bin and the
+# shared resources under usr/share; this script wires the environment up so the
+# studio finds its fonts, desktop entry, and icon.
+set -eu
+
+HERE="$(dirname "$(readlink -f "$0")")"
+export APPDIR="${APPDIR:-$HERE}"
+
+# Bundled caption fonts for libass burn-in.
+export SUBLAYER_FONTS_DIR="${SUBLAYER_FONTS_DIR:-$APPDIR/usr/share/sublayer/fonts}"
+# Prefer the libraries shipped inside the AppImage over host ones.
+export LD_LIBRARY_PATH="$APPDIR/usr/lib:$APPDIR/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# Keep GTK/pixbuf and XDG data lookups inside the bundle when present.
+export XDG_DATA_DIRS="$APPDIR/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+# Software fallback when the host has no usable GL driver.
+: "${SLINT_BACKEND:=winit-femtovg}"
+export SLINT_BACKEND
+
+exec "$APPDIR/usr/bin/sublayer-ui" "$@"

@@ -3,3 +3,4 @@
 /*.md
 !/README.md
 /.ee.toml
+/packaging/appimage/AppDir/

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use sublayer_ai::AiError;
 use sublayer_core::CoreError;
+use sublayer_export::ExportError;
 use sublayer_media::MediaError;
 use sublayer_subtitles::SubtitleError;
 
@@ -15,9 +16,13 @@ pub enum CliError {
     #[error(transparent)]
     Ai(#[from] AiError),
 
-    /// Probing or audio extraction failed.
+    /// Probing, audio extraction, or video rendering failed.
     #[error(transparent)]
     Media(#[from] MediaError),
+
+    /// Hardware probing or the FFmpeg render failed.
+    #[error(transparent)]
+    Export(#[from] ExportError),
 
     /// Segmentation or caption compilation failed.
     #[error(transparent)]
@@ -49,9 +54,9 @@ pub enum CliError {
     #[error("unsupported output format `{0}` (expected .ass, .srt, .vtt, or .json)")]
     UnsupportedOutput(String),
 
-    /// The render pipeline is not built yet.
-    #[error("render is not implemented yet; it lands with sublayer-export (phase 5)")]
-    RenderDeferred,
+    /// The `--encoder` argument names no known encoder.
+    #[error("unknown encoder `{0}` (expected auto, vaapi, nvenc, or cpu)")]
+    UnknownEncoder(String),
 
     /// The blocking transcription worker panicked.
     #[error("background transcription task failed: {0}")]

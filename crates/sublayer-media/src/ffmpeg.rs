@@ -1,10 +1,14 @@
-//! Process helpers shared by the FFmpeg and FFprobe wrappers.
+//! Process helpers shared by every FFmpeg invocation in the workspace.
 //!
 //! Media tools are located on `PATH` unless the corresponding `SUBLAYER_*`
 //! environment variable points at an explicit executable, which keeps the
 //! crates usable inside Flatpak sandboxes and custom installations. Children
 //! are started with `kill_on_drop`, so dropping a caller's future (or hitting a
 //! `tokio::time::timeout`) terminates the encoder instead of leaking it.
+//!
+//! `sublayer-export` builds its render commands on top of [`command`] and
+//! [`resolve`], so encoder invocations behave exactly like probe and audio
+//! extraction: overridable binaries, no stdin, piped output, kill-on-drop.
 
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output, Stdio};
@@ -14,19 +18,19 @@ use tokio::process::Command;
 use crate::MediaError;
 
 /// Binary name of the FFmpeg CLI.
-pub(crate) const FFMPEG: &str = "ffmpeg";
+pub const FFMPEG: &str = "ffmpeg";
 /// Binary name of the FFprobe CLI.
-pub(crate) const FFPROBE: &str = "ffprobe";
+pub const FFPROBE: &str = "ffprobe";
 /// Environment variable overriding the auto-detected `ffmpeg` executable.
-pub(crate) const FFMPEG_ENV: &str = "SUBLAYER_FFMPEG";
+pub const FFMPEG_ENV: &str = "SUBLAYER_FFMPEG";
 /// Environment variable overriding the auto-detected `ffprobe` executable.
-pub(crate) const FFPROBE_ENV: &str = "SUBLAYER_FFPROBE";
+pub const FFPROBE_ENV: &str = "SUBLAYER_FFPROBE";
 
 /// Longest stderr excerpt kept inside [`MediaError::CommandFailed`].
 const STDERR_EXCERPT_CHARS: usize = 2_000;
 
 /// Locates `binary` on `PATH`, preferring a non-empty `env_key` override.
-pub(crate) fn resolve(binary: &'static str, env_key: &str) -> Result<PathBuf, MediaError> {
+pub fn resolve(binary: &'static str, env_key: &str) -> Result<PathBuf, MediaError> {
     if let Some(value) = std::env::var_os(env_key).filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(value));
     }
@@ -34,7 +38,7 @@ pub(crate) fn resolve(binary: &'static str, env_key: &str) -> Result<PathBuf, Me
 }
 
 /// Builds a command that never reads stdin and dies with its future.
-pub(crate) fn command(program: &Path) -> Command {
+pub fn command(program: &Path) -> Command {
     let mut command = Command::new(program);
     command
         .stdin(Stdio::null())
@@ -45,7 +49,7 @@ pub(crate) fn command(program: &Path) -> Command {
 }
 
 /// Runs `command` to completion, buffering stdout and stderr.
-pub(crate) async fn run(binary: &'static str, command: &mut Command) -> Result<Output, MediaError> {
+pub async fn run(binary: &'static str, command: &mut Command) -> Result<Output, MediaError> {
     tracing::debug!(command = %describe(command), "running media tool");
     command
         .output()
@@ -55,7 +59,7 @@ pub(crate) async fn run(binary: &'static str, command: &mut Command) -> Result<O
 
 /// Turns a non-zero exit status into a [`MediaError::CommandFailed`] carrying a
 /// bounded stderr excerpt.
-pub(crate) fn failure(binary: &'static str, status: ExitStatus, stderr: &[u8]) -> MediaError {
+pub fn failure(binary: &'static str, status: ExitStatus, stderr: &[u8]) -> MediaError {
     MediaError::CommandFailed {
         binary,
         status,

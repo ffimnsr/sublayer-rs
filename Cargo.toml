@@ -2,7 +2,7 @@
 #
 # Members are added as roadmap phases land (see PLAN.md §7). Phase 1 ships the
 # foundation and media crates; later phases append `sublayer-ai`,
-# `sublayer-subtitles`, `sublayer-ui`, `sublayer-export`, and `sublayer-cli`.
+# `sublayer-subtitles`, `sublayer-export`, `sublayer-ui`, and `sublayer-cli`.
 
 [workspace]
 resolver = "3"
@@ -12,6 +12,7 @@ members = [
     "crates/sublayer-ai",
     "crates/sublayer-whisper",
     "crates/sublayer-subtitles",
+    "crates/sublayer-export",
     "crates/sublayer-ui",
     "crates/sublayer-cli",
 ]
@@ -31,6 +32,7 @@ sublayer-media = { path = "crates/sublayer-media" }
 sublayer-ai = { path = "crates/sublayer-ai" }
 sublayer-whisper = { path = "crates/sublayer-whisper" }
 sublayer-subtitles = { path = "crates/sublayer-subtitles" }
+sublayer-export = { path = "crates/sublayer-export" }
 sublayer-ui = { path = "crates/sublayer-ui" }
 sublayer-cli = { path = "crates/sublayer-cli" }
 

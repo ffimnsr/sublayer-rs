@@ -212,6 +212,12 @@ pub fn segment_meta(segments: &[CaptionSegment], index: usize) -> SharedString {
     .into()
 }
 
+/// `M:SS`, compact duration used for progress ETAs.
+pub fn format_eta(seconds: f64) -> String {
+    let seconds = seconds.max(0.0).round() as u64;
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
 /// `MM:SS.mmm` timecode, mirroring the Slint `Format.timecode` helper.
 pub fn format_timecode(ms: u64) -> String {
     let minutes = ms / 60_000;
@@ -369,6 +375,9 @@ mod tests {
         );
         assert_eq!(segment_meta(&segments, 5).as_str(), "");
         assert_eq!(format_timecode(3_723_004), "62:03.004");
+        assert_eq!(format_eta(0.0), "00:00");
+        assert_eq!(format_eta(95.4), "01:35");
+        assert_eq!(format_eta(-3.0), "00:00");
     }
 
     #[test]

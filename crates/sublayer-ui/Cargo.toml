@@ -18,6 +18,7 @@ sublayer-core.workspace = true
 sublayer-media.workspace = true
 sublayer-ai.workspace = true
 sublayer-subtitles.workspace = true
+sublayer-export.workspace = true
 slint.workspace = true
 crossbeam-channel.workspace = true
 rfd.workspace = true

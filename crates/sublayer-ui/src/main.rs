@@ -14,6 +14,7 @@ mod app;
 mod bridge;
 mod error;
 mod session;
+mod views;
 #[cfg(test)]
 mod window_tests;
 

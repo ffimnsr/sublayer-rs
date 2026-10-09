@@ -10,14 +10,18 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crossbeam_channel::Receiver;
-use slint::{Color, ComponentHandle, ModelRc, SharedString, VecModel, Weak};
-use sublayer_core::{Project, Rgba};
-use sublayer_subtitles::PRESET_NAMES;
+use slint::{ComponentHandle, SharedString, Weak};
+use sublayer_core::Project;
+use sublayer_export::{EncoderPreference, ExportOptions};
 
 use crate::adapters;
 use crate::bridge::{Bridge, TranscribeRequest, UiEvent, model_names};
 use crate::error::UiError;
 use crate::session::{DragMode, PreviewOutcome, Session};
+use crate::views::{
+    install_static_options, refresh_document, refresh_encoder, refresh_playhead, refresh_segments,
+    refresh_task, refresh_theme, refresh_timeline,
+};
 use crate::{MainWindow, ThemeData};
 
 /// Poll interval of the bridge pump; 60 Hz keeps scrubbing responsive.
@@ -69,6 +73,9 @@ impl App {
 
         install_static_options(&ui);
         wire_callbacks(&ui, &bridge, &session, &media);
+        // Resolve the render encoder in the background; renders use it until
+        // the user overrides via `SUBLAYER_ENCODER`.
+        bridge.probe_render_encoder(EncoderPreference::default());
 
         let timer = slint::Timer::default();
         {
@@ -108,41 +115,8 @@ impl App {
         refresh_segments(&self.ui, &session);
         refresh_playhead(&self.ui, &session);
         refresh_timeline(&self.ui, &session);
+        refresh_encoder(&self.ui, &session);
     }
-}
-
-/// Fills the static option lists (models, presets, alignments, animations).
-pub(crate) fn install_static_options(ui: &MainWindow) {
-    let names: Vec<SharedString> = model_names().into_iter().map(SharedString::from).collect();
-    let default_index = names
-        .iter()
-        .position(|name| name.as_str() == "base.en")
-        .unwrap_or(0) as i32;
-    ui.set_model_names(ModelRc::new(VecModel::from(names)));
-    ui.set_model_index(default_index);
-
-    ui.set_preset_names(strings(PRESET_NAMES));
-    ui.set_alignment_names(strings(&[
-        "Bottom left",
-        "Bottom center",
-        "Bottom right",
-        "Middle left",
-        "Middle center",
-        "Middle right",
-        "Top left",
-        "Top center",
-        "Top right",
-    ]));
-    ui.set_animation_names(strings(&["None", "Word pop", "Karaoke", "Bounce"]));
-}
-
-/// Builds a Slint string model from a slice of string literals.
-fn strings(values: &[&str]) -> ModelRc<SharedString> {
-    let values: Vec<SharedString> = values
-        .iter()
-        .map(|value| SharedString::from(*value))
-        .collect();
-    ModelRc::new(VecModel::from(values))
 }
 
 /// Registers every UI callback.
@@ -228,6 +202,27 @@ fn wire_callbacks(
                 }
                 None => set_status(&weak, &session, "Open a video before exporting".to_owned()),
             }
+        });
+    }
+    {
+        let bridge = bridge.clone();
+        let session = Rc::clone(session);
+        let weak = weak.clone();
+        ui.on_export_video_requested(move || {
+            let name = {
+                let session = session.borrow();
+                let Some(project) = session.project.as_ref() else {
+                    return;
+                };
+                let stem = project
+                    .video_path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "captioned".to_owned());
+                format!("{stem}-captioned.mp4")
+            };
+            bridge.pick_video_export_file(name);
+            let _ = &weak;
         });
     }
     {
@@ -511,6 +506,45 @@ fn handle_event(
                 bridge.export_ass(project, media.fonts_dir.clone(), path);
             }
         }
+        UiEvent::VideoExportFilePicked { path } => {
+            let path = with_video_extension(path);
+            let request = {
+                let session = session.borrow();
+                session.project.clone().map(|project| {
+                    let options = ExportOptions {
+                        encoder: session.render_encoder,
+                        duration_ms: project.video_metadata.duration_ms(),
+                        quality: session.render_quality,
+                        vaapi_device: session.render_probe.vaapi_device.clone(),
+                    };
+                    (project, options)
+                })
+            };
+            if let Some((project, options)) = request {
+                bridge.export_video(project, media.fonts_dir.clone(), path, options);
+            }
+        }
+        UiEvent::VideoExported { path } => {
+            session
+                .borrow_mut()
+                .finish_task(format!("Wrote {}", path.display()));
+            refresh_task(ui, &session.borrow());
+        }
+        UiEvent::HardwareProbed { probe, encoder } => {
+            session.borrow_mut().set_render_encoder(probe, encoder);
+            let session = session.borrow();
+            refresh_encoder(ui, &session);
+        }
+        UiEvent::RenderProgress {
+            percentage,
+            fps,
+            eta_seconds,
+        } => {
+            session
+                .borrow_mut()
+                .set_render_progress(percentage, fps, eta_seconds);
+            refresh_task(ui, &session.borrow());
+        }
         UiEvent::Probed {
             video_path,
             metadata,
@@ -684,111 +718,13 @@ fn default_project_name(project: &Project) -> String {
     format!("{stem}.sublayer")
 }
 
-/// Converts a domain color into a Slint color.
-fn slint_color(color: Rgba) -> Color {
-    Color::from_argb_u8(color.a, color.r, color.g, color.b)
-}
-
-/// Converts a millisecond count into the `int` range used by the UI.
-fn ui_ms(ms: u64) -> i32 {
-    ms.min(i32::MAX as u64) as i32
-}
-
-/// Pushes the project identity and duration.
-pub(crate) fn refresh_document(ui: &MainWindow, session: &Session) {
-    match session.project.as_ref() {
-        Some(project) => {
-            ui.set_has_project(true);
-            ui.set_project_name(project.name.as_str().into());
-            ui.set_video_path(project.video_path.to_string_lossy().into_owned().into());
-            ui.set_video_width(project.video_metadata.width.min(i32::MAX as u32) as i32);
-            ui.set_video_height(project.video_metadata.height.min(i32::MAX as u32) as i32);
-            ui.set_duration_ms(ui_ms(project.video_metadata.duration_ms()));
-        }
-        None => {
-            ui.set_has_project(false);
-            ui.set_project_name("Untitled project".into());
-            ui.set_duration_ms(0);
-        }
+/// Ensures the render destination names a container FFmpeg can infer.
+pub(crate) fn with_video_extension(path: PathBuf) -> PathBuf {
+    if path
+        .extension()
+        .is_some_and(|extension| !extension.is_empty())
+    {
+        return path;
     }
-}
-
-/// Pushes the theme into the inspector and the preview overlay.
-pub(crate) fn refresh_theme(ui: &MainWindow, session: &Session) {
-    let Some(project) = session.project.as_ref() else {
-        return;
-    };
-    let theme = &project.theme;
-    ui.set_theme(adapters::theme_data_from(theme));
-    ui.set_primary_color(slint_color(theme.primary_color));
-    ui.set_highlight_color(slint_color(theme.highlight_color));
-    ui.set_outline_color(slint_color(theme.outline_color));
-}
-
-/// Pushes the caption cards and the inspector's text editor.
-pub(crate) fn refresh_segments(ui: &MainWindow, session: &Session) {
-    let (segments, selected) = match session.project.as_ref() {
-        Some(project) => (project.segments.as_slice(), session.selected),
-        None => (&[][..] as &[sublayer_core::CaptionSegment], None),
-    };
-    ui.set_segments(adapters::segments_model(segments, selected));
-    ui.set_has_selection(session.selected.is_some());
-    match session.selected_segment() {
-        Some((_, segment)) => {
-            ui.set_caption_text(segment.text().as_str().into());
-            ui.set_caption_meta(
-                session
-                    .selected
-                    .map(|index| adapters::segment_meta(segments, index))
-                    .unwrap_or_default(),
-            );
-        }
-        None => {
-            ui.set_caption_text(SharedString::default());
-            ui.set_caption_meta(
-                if segments.is_empty() {
-                    "Transcribe to create caption cards"
-                } else {
-                    "Select a card on the timeline"
-                }
-                .into(),
-            );
-        }
-    }
-}
-
-/// Pushes the playhead, timecode, and the caption shown over the frame.
-pub(crate) fn refresh_playhead(ui: &MainWindow, session: &Session) {
-    ui.set_playhead_ms(ui_ms(session.playhead_ms));
-    ui.set_preview_timecode(adapters::format_timecode(session.playhead_ms).into());
-    let caption = session
-        .project
-        .as_ref()
-        .and_then(|project| adapters::caption_at(project, session.playhead_ms));
-    ui.set_show_caption(caption.is_some());
-    ui.set_active_caption(caption.unwrap_or_default());
-}
-
-/// Pushes zoom, scroll, and the waveform window.
-pub(crate) fn refresh_timeline(ui: &MainWindow, session: &Session) {
-    ui.set_scroll_ms(ui_ms(session.scroll_ms));
-    ui.set_pixels_per_second(session.pixels_per_second);
-
-    let viewport_px = ui.get_timeline_pixels();
-    let (base_ms, column_ms, columns) = session.column_plan(viewport_px);
-    let buckets = session
-        .waveform
-        .as_ref()
-        .map(|cache| adapters::waveform_window(cache, base_ms, column_ms, columns))
-        .unwrap_or_default();
-    ui.set_column_base_ms(ui_ms(base_ms));
-    ui.set_column_ms(ui_ms(column_ms));
-    ui.set_buckets(ModelRc::new(VecModel::from(buckets)));
-}
-
-/// Pushes the busy indicator and the status line.
-pub(crate) fn refresh_task(ui: &MainWindow, session: &Session) {
-    ui.set_busy(session.task.busy);
-    ui.set_task_progress(session.task.progress);
-    ui.set_status(session.task.status.as_str().into());
+    path.with_extension("mp4")
 }

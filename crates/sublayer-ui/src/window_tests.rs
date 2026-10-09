@@ -4,6 +4,7 @@
 //! The backend is installed per test thread (`init_no_event_loop`), so these
 //! tests never need a Wayland or X11 session.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use slint::{ComponentHandle, Model, PhysicalSize};
@@ -11,11 +12,12 @@ use sublayer_core::{CaptionSegment, Project, VideoMetadata, WordToken};
 use sublayer_media::{WaveformBucket, WaveformCache};
 
 use crate::MainWindow;
-use crate::app::{
-    install_static_options, refresh_document, refresh_playhead, refresh_segments, refresh_task,
-    refresh_theme, refresh_timeline,
-};
+use crate::app::with_video_extension;
 use crate::session::Session;
+use crate::views::{
+    install_static_options, refresh_document, refresh_encoder, refresh_playhead, refresh_segments,
+    refresh_task, refresh_theme, refresh_timeline,
+};
 
 /// Instantiates the window with a fixed size and the static option lists.
 fn window() -> MainWindow {
@@ -71,6 +73,34 @@ fn empty_window_shows_the_idle_state() {
     assert_eq!(ui.get_alignment_names().row_count(), 9);
     assert_eq!(ui.get_animation_names().row_count(), 4);
     assert!(ui.get_timeline_pixels() > 0.0, "layout must resolve");
+}
+
+#[test]
+fn export_destination_gains_a_container_extension() {
+    assert_eq!(
+        with_video_extension(PathBuf::from("/tmp/clip-captioned")),
+        PathBuf::from("/tmp/clip-captioned.mp4")
+    );
+    assert_eq!(
+        with_video_extension(PathBuf::from("/tmp/clip.mkv")),
+        PathBuf::from("/tmp/clip.mkv")
+    );
+}
+
+#[test]
+fn encoder_label_reflects_the_probe() {
+    let ui = window();
+    let mut session = Session::default();
+    session.set_render_encoder(
+        sublayer_export::HardwareProbe {
+            vaapi: true,
+            nvenc: false,
+            vaapi_device: Some(std::path::PathBuf::from("/dev/dri/renderD128")),
+        },
+        sublayer_export::HardwareEncoder::Vaapi,
+    );
+    refresh_encoder(&ui, &session);
+    assert_eq!(ui.get_encoder_label().as_str(), "Encoder: VA-API");
 }
 
 #[test]

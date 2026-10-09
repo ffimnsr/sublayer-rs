@@ -13,6 +13,10 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use sublayer_ai::{MODELS, ModelManager, TranscriberConfig, transcribe_audio};
 use sublayer_core::{CaptionSegment, Project, SublayerPaths, VideoMetadata};
+use sublayer_export::{
+    EncoderPreference, ExportOptions, HardwareEncoder, HardwareProbe, export_project,
+    probe_hardware,
+};
 use sublayer_media::{
     DEFAULT_BUCKETS_PER_SEC, PreviewConfig, RgbaFrame, WaveformCache, decode_frame_at,
     extract_audio_16k, probe_video, waveform_from_wav,
@@ -41,6 +45,8 @@ pub enum UiEvent {
     ProjectSaveFilePicked { path: PathBuf },
     /// A destination was chosen for the caption export dialog.
     ExportFilePicked { path: PathBuf },
+    /// A destination was chosen for the video render dialog.
+    VideoExportFilePicked { path: PathBuf },
     /// FFprobe finished; the UI can create the project document.
     Probed {
         video_path: PathBuf,
@@ -64,6 +70,24 @@ pub enum UiEvent {
     ProjectSaved { path: PathBuf },
     /// A caption file finished writing.
     CaptionsExported { path: PathBuf },
+    /// A rendered video finished writing.
+    VideoExported { path: PathBuf },
+    /// The hardware probe finished; these drive the next render.
+    HardwareProbed {
+        /// Full probe result, including the VA-API device.
+        probe: HardwareProbe,
+        /// Encoder renders will use.
+        encoder: HardwareEncoder,
+    },
+    /// Progress of the running video render.
+    RenderProgress {
+        /// Encoded fraction in `0.0..=1.0`.
+        percentage: f32,
+        /// Instantaneous encoding speed.
+        fps: f32,
+        /// Estimated seconds left.
+        eta_seconds: f64,
+    },
     /// A background task started.
     TaskStarted { label: String },
     /// Fractional progress in `0.0..=1.0` of the running task.
@@ -182,6 +206,60 @@ impl Bridge {
     /// Opens the caption export dialog.
     pub fn pick_export_file(&self, default_name: String) {
         self.pick_file(DialogKind::ExportAss { default_name });
+    }
+
+    /// Opens the rendered-video destination dialog.
+    pub fn pick_video_export_file(&self, default_name: String) {
+        self.pick_file(DialogKind::ExportVideo { default_name });
+    }
+
+    /// Probes the machine and reports the encoder renders should use.
+    pub fn probe_render_encoder(&self, preference: EncoderPreference) {
+        let emitter = self.emitter.clone();
+        self.handle.spawn(async move {
+            let probe = match probe_hardware().await {
+                Ok(probe) => probe,
+                Err(error) => {
+                    tracing::warn!(%error, "hardware probe failed; rendering will use the CPU");
+                    HardwareProbe::default()
+                }
+            };
+            let encoder = probe.select(preference).unwrap_or(HardwareEncoder::Cpu);
+            emitter.send(UiEvent::HardwareProbed { probe, encoder });
+        });
+    }
+
+    /// Burns the project's captions into a new video.
+    pub fn export_video(
+        &self,
+        project: Project,
+        fonts_dir: PathBuf,
+        output: PathBuf,
+        options: ExportOptions,
+    ) {
+        let emitter = self.emitter.clone();
+        self.handle.spawn(async move {
+            emitter.start(format!("Rendering with {}", options.encoder.label()));
+            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(64);
+            let render = tokio::spawn({
+                let output = output.clone();
+                async move { export_project(&project, &output, &fonts_dir, &options, progress_tx).await }
+            });
+            while let Some(progress) = progress_rx.recv().await {
+                emitter.send(UiEvent::RenderProgress {
+                    percentage: progress.percentage,
+                    fps: progress.current_fps,
+                    eta_seconds: progress.eta_seconds,
+                });
+            }
+            match render.await {
+                Ok(Ok(())) => emitter.send(UiEvent::VideoExported { path: output }),
+                Ok(Err(error)) => emitter.fail(&error),
+                Err(error) => emitter.send(UiEvent::Failed {
+                    message: format!("render task failed: {error}"),
+                }),
+            }
+        });
     }
 
     /// Probes a video and builds the waveform; both results arrive as events.
@@ -385,9 +463,14 @@ impl Bridge {
                 DialogKind::ExportAss { default_name } => dialog
                     .add_filter("ASS subtitles", &["ass"])
                     .set_file_name(default_name),
+                DialogKind::ExportVideo { default_name } => dialog
+                    .add_filter("Video", &["mp4", "mkv", "mov", "webm"])
+                    .set_file_name(default_name),
             };
             let picked = match kind {
-                DialogKind::SaveProject { .. } | DialogKind::ExportAss { .. } => dialog.save_file(),
+                DialogKind::SaveProject { .. }
+                | DialogKind::ExportAss { .. }
+                | DialogKind::ExportVideo { .. } => dialog.save_file(),
                 _ => dialog.pick_file(),
             };
             if let Some(event) = kind.event(picked) {
@@ -482,6 +565,7 @@ enum DialogKind {
     Project,
     SaveProject { default_name: String },
     ExportAss { default_name: String },
+    ExportVideo { default_name: String },
 }
 
 impl DialogKind {
@@ -493,6 +577,7 @@ impl DialogKind {
             Self::Project => UiEvent::ProjectFilePicked { path },
             Self::SaveProject { .. } => UiEvent::ProjectSaveFilePicked { path },
             Self::ExportAss { .. } => UiEvent::ExportFilePicked { path },
+            Self::ExportVideo { .. } => UiEvent::VideoExportFilePicked { path },
         })
     }
 }
@@ -526,6 +611,15 @@ mod tests {
         .event(Some(PathBuf::from("/tmp/subs.ass")))
         .unwrap();
         assert!(matches!(export, UiEvent::ExportFilePicked { .. }));
+        let video_export = DialogKind::ExportVideo {
+            default_name: "clip-captioned.mp4".to_owned(),
+        }
+        .event(Some(PathBuf::from("/tmp/clip-captioned.mp4")))
+        .unwrap();
+        assert!(matches!(
+            video_export,
+            UiEvent::VideoExportFilePicked { .. }
+        ));
     }
 
     #[test]

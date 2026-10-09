@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use sublayer_core::{CaptionSegment, Project, ThemeStyle, WordToken};
+use sublayer_export::{HardwareEncoder, HardwareProbe};
 use sublayer_media::WaveformCache;
 
 /// Zoom bounds of the timeline, in pixels per second. The upper bound keeps a
@@ -128,6 +129,12 @@ pub struct Session {
     pub enable_vad: bool,
     /// Index into the preset list currently applied to the theme.
     pub preset_index: i32,
+    /// Encoders detected on this machine.
+    pub render_probe: HardwareProbe,
+    /// Encoder the next render will use.
+    pub render_encoder: HardwareEncoder,
+    /// x264 CRF / NVENC & VA-API quality for renders.
+    pub render_quality: u8,
     /// Running task indicator.
     pub task: TaskState,
     /// Preview decoder state.
@@ -149,6 +156,9 @@ impl Default for Session {
             use_gpu: false,
             enable_vad: true,
             preset_index: 0,
+            render_probe: HardwareProbe::default(),
+            render_encoder: HardwareEncoder::Cpu,
+            render_quality: 20,
             task: TaskState::default(),
             preview: PreviewState::default(),
             drag: None,
@@ -487,6 +497,24 @@ impl Session {
         self.task.progress = fraction.clamp(0.0, 1.0);
     }
 
+    /// Updates the render progress, including the status line summary.
+    pub fn set_render_progress(&mut self, percentage: f32, fps: f32, eta_seconds: f64) {
+        let percentage = percentage.clamp(0.0, 1.0);
+        self.task.progress = percentage;
+        self.task.status = format!(
+            "Rendering {}% · {:.1} fps · ETA {}",
+            (percentage * 100.0).round(),
+            fps,
+            crate::adapters::format_eta(eta_seconds)
+        );
+    }
+
+    /// Adopts the encoder resolved by the hardware probe.
+    pub fn set_render_encoder(&mut self, probe: HardwareProbe, encoder: HardwareEncoder) {
+        self.render_probe = probe;
+        self.render_encoder = encoder;
+    }
+
     /// Marks the running task as finished.
     pub fn finish_task(&mut self, status: impl Into<String>) {
         self.task = TaskState {
@@ -761,5 +789,32 @@ mod tests {
         session.install_video(project_with_segments(&[(0, 500)]), 0);
         assert_eq!(session.preview_ready(token, 0), PreviewOutcome::Idle);
         assert_eq!(session.preview.shown_ms, None);
+    }
+
+    #[test]
+    fn render_progress_updates_the_status_line() {
+        let mut session = session_with(&[(0, 1_000)]);
+        session.begin_task("Rendering with CPU (libx264)");
+        session.set_render_progress(0.42, 25.4, 12.6);
+        assert!(session.task.busy);
+        assert!((session.task.progress - 0.42).abs() < 1e-6);
+        assert_eq!(session.task.status, "Rendering 42% · 25.4 fps · ETA 00:13");
+    }
+
+    #[test]
+    fn probed_encoder_is_adopted_for_renders() {
+        use sublayer_export::{HardwareEncoder, HardwareProbe};
+
+        let mut session = Session::default();
+        session.set_render_encoder(
+            HardwareProbe {
+                vaapi: false,
+                nvenc: true,
+                vaapi_device: None,
+            },
+            HardwareEncoder::Nvenc,
+        );
+        assert_eq!(session.render_encoder, HardwareEncoder::Nvenc);
+        assert!(session.render_probe.nvenc);
     }
 }

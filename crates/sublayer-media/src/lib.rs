@@ -1,5 +1,6 @@
 //! Media foundation for Sublayer: FFprobe metadata, Whisper-ready audio
-//! extraction, timeline waveform caches, and single-frame video previews.
+//! extraction, timeline waveform caches, single-frame video previews, and the
+//! shared FFmpeg process layer used across the workspace.
 //!
 //! Every external invocation goes through the private `ffmpeg` helpers, which
 //! locate the executables on `PATH` (or via `SUBLAYER_FFMPEG` /
@@ -7,7 +8,7 @@
 
 pub mod audio;
 pub mod error;
-mod ffmpeg;
+pub mod ffmpeg;
 pub mod preview;
 pub mod probe;
 pub mod waveform;

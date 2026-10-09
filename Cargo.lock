@@ -5091,6 +5091,7 @@ dependencies = [
  "serde_json",
  "sublayer-ai",
  "sublayer-core",
+ "sublayer-export",
  "sublayer-media",
  "sublayer-subtitles",
  "tempfile",
@@ -5109,6 +5110,19 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "uuid",
+]
+
+[[package]]
+name = "sublayer-export"
+version = "0.1.0"
+dependencies = [
+ "sublayer-core",
+ "sublayer-media",
+ "sublayer-subtitles",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -5147,6 +5161,7 @@ dependencies = [
  "slint-build",
  "sublayer-ai",
  "sublayer-core",
+ "sublayer-export",
  "sublayer-media",
  "sublayer-subtitles",
  "tempfile",

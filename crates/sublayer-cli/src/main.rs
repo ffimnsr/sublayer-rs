@@ -16,6 +16,7 @@ use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use sublayer_ai::{ModelManager, TranscriberConfig, transcribe_audio};
 use sublayer_core::{SublayerPaths, VideoMetadata};
+use sublayer_export::{EncoderPreference, ExportOptions, probe_hardware, run_export};
 use sublayer_media::{extract_audio_16k, probe_video};
 use sublayer_subtitles::{
     build_ass_script, build_srt, build_vtt, preset, resolve_fonts_dir, segment_words,
@@ -72,16 +73,45 @@ enum Command {
         #[arg(long)]
         threads: Option<usize>,
     },
-    /// Renders captions onto a video. Lands with `sublayer-export` (phase 5).
+    /// Renders captions onto a video with FFmpeg.
+    ///
+    /// Captions are compiled from a fresh transcription unless `--subtitles`
+    /// points at an existing ASS file.
     Render {
         /// Media file to render.
         input: PathBuf,
-        /// Output video file.
+        /// Output video file; the container follows the extension.
         #[arg(short, long)]
         output: PathBuf,
-        /// Theme preset name or custom theme JSON path.
+        /// Theme preset name or custom theme JSON path; ignored with
+        /// `--subtitles`.
         #[arg(long, default_value = "tiktok-classic")]
         theme: String,
+        /// Pre-compiled ASS file; skips transcription entirely.
+        #[arg(short, long)]
+        subtitles: Option<PathBuf>,
+        /// Video encoder: `auto` (VA-API, then NVENC, then CPU) or an explicit
+        /// backend. `SUBLAYER_ENCODER` is consulted when the flag is omitted.
+        #[arg(long)]
+        encoder: Option<String>,
+        /// x264 CRF or NVENC/VA-API quality level, `0`–`51`.
+        #[arg(long, default_value_t = 20)]
+        quality: u8,
+        /// Whisper model used when `--subtitles` is not given.
+        #[arg(short, long, default_value = "base.en")]
+        model: String,
+        /// Spoken language; auto-detected when omitted.
+        #[arg(long)]
+        language: Option<String>,
+        /// Skips the energy VAD pre-filter.
+        #[arg(long)]
+        no_vad: bool,
+        /// Requests the GPU backend for Whisper inference.
+        #[arg(long)]
+        gpu: bool,
+        /// Whisper worker threads; defaults to the CPU count.
+        #[arg(long)]
+        threads: Option<usize>,
     },
 }
 
@@ -119,6 +149,21 @@ async fn main() {
         eprintln!("error: {error}");
         std::process::exit(1);
     }
+}
+
+/// Options forwarded from the `render` subcommand into the pipeline.
+struct RenderOptions {
+    input: PathBuf,
+    output: PathBuf,
+    theme: String,
+    subtitles: Option<PathBuf>,
+    encoder: Option<String>,
+    quality: u8,
+    model: String,
+    language: Option<String>,
+    no_vad: bool,
+    gpu: bool,
+    threads: Option<usize>,
 }
 
 /// Options forwarded from the `transcribe` subcommand into the pipeline.
@@ -164,9 +209,29 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             input,
             output,
             theme,
+            subtitles,
+            encoder,
+            quality,
+            model,
+            language,
+            no_vad,
+            gpu,
+            threads,
         } => {
-            let _ = (input, output, theme);
-            Err(CliError::RenderDeferred)
+            run_render(RenderOptions {
+                input,
+                output,
+                theme,
+                subtitles,
+                encoder,
+                quality,
+                model,
+                language,
+                no_vad,
+                gpu,
+                threads,
+            })
+            .await
         }
     }
 }
@@ -203,6 +268,107 @@ async fn run_transcribe(options: TranscribeOptions) -> Result<(), CliError> {
     let format = OutputFormat::from_path(&output)?;
 
     let metadata = probe_video(&input).await?;
+    let words = transcribe_words(&input, &model, language, no_vad, gpu, threads).await?;
+    let segments = segment_words(&words, &sublayer_subtitles::SegmenterConfig::default());
+
+    let fonts_dir = resolve_fonts_dir();
+    let body = compile(&segments, format, &theme, &metadata, &fonts_dir)?;
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&output, body)?;
+    println!("Wrote {}", output.display());
+    Ok(())
+}
+
+/// Render pipeline: probe → captions (given or transcribed) → hardware
+/// selection → FFmpeg burn-in.
+async fn run_render(options: RenderOptions) -> Result<(), CliError> {
+    let RenderOptions {
+        input,
+        output,
+        theme,
+        subtitles,
+        encoder,
+        quality,
+        model,
+        language,
+        no_vad,
+        gpu,
+        threads,
+    } = options;
+
+    // Argument errors are reported before any probe, download, or render work.
+    let preference = match encoder.as_deref() {
+        Some(value) => EncoderPreference::parse(value)
+            .ok_or_else(|| CliError::UnknownEncoder(value.to_owned()))?,
+        None => EncoderPreference::from_env()?.unwrap_or_default(),
+    };
+    if !input.is_file() {
+        return Err(CliError::MissingInput(input.clone()));
+    }
+    if let Some(path) = &subtitles {
+        if !path.is_file() {
+            return Err(CliError::MissingInput(path.clone()));
+        }
+    }
+
+    let metadata = probe_video(&input).await?;
+    let fonts_dir = resolve_fonts_dir();
+
+    // Captions: an existing ASS file, or a fresh transcription compiled with
+    // the requested theme. The temporary script lives until the render ends.
+    let compiled = match subtitles {
+        Some(_) => None,
+        None => {
+            let theme = resolve_theme(&theme)?;
+            let words = transcribe_words(&input, &model, language, no_vad, gpu, threads).await?;
+            let segments = segment_words(&words, &sublayer_subtitles::SegmenterConfig::default());
+            let script = build_ass_script(&segments, &theme, &metadata, &fonts_dir)?;
+            println!("Compiled {} caption cards", segments.len());
+            let script_file = tempfile::Builder::new()
+                .prefix("sublayer-render-")
+                .suffix(".ass")
+                .tempfile()?;
+            std::fs::write(script_file.path(), script)?;
+            Some(script_file)
+        }
+    };
+    let ass_path = match (compiled.as_ref(), subtitles.as_ref()) {
+        (Some(file), _) => file.path().to_path_buf(),
+        (None, Some(path)) => path.clone(),
+        (None, None) => return Err(CliError::MissingInput(input)),
+    };
+
+    let probe = probe_hardware().await?;
+    let hardware = probe.select(preference)?;
+    println!("Encoding with {}", hardware.label());
+
+    let export_options = ExportOptions {
+        encoder: hardware,
+        duration_ms: metadata.duration_ms(),
+        quality,
+        vaapi_device: probe.vaapi_device.clone(),
+    };
+    render_with_progress(&input, &output, &ass_path, &fonts_dir, &export_options).await?;
+    println!("Wrote {}", output.display());
+    Ok(())
+}
+
+/// Extracts 16 kHz audio and transcribes it into word tokens.
+///
+/// The temporary WAV lives only for the duration of the call.
+async fn transcribe_words(
+    input: &Path,
+    model: &str,
+    language: Option<String>,
+    no_vad: bool,
+    gpu: bool,
+    threads: Option<usize>,
+) -> Result<Vec<sublayer_core::WordToken>, CliError> {
     let audio = tempfile::Builder::new()
         .prefix("sublayer-")
         .suffix(".wav")
@@ -210,16 +376,16 @@ async fn run_transcribe(options: TranscribeOptions) -> Result<(), CliError> {
     let wav_path = audio.path().to_path_buf();
 
     println!("Extracting 16 kHz mono audio from {}", input.display());
-    extract_audio_16k(&input, &wav_path).await?;
+    extract_audio_16k(input, &wav_path).await?;
 
     println!("Ensuring model `{model}` is available");
     let manager = ModelManager::new(SublayerPaths::resolve()?)?;
     // `--model` accepts either a pinned model name (downloaded on demand) or
     // a path to an existing GGML file, which skips the downloader.
-    let model_path = if Path::new(&model).is_file() {
-        PathBuf::from(&model)
+    let model_path = if Path::new(model).is_file() {
+        PathBuf::from(model)
     } else {
-        manager.ensure_cached(&model).await?
+        manager.ensure_cached(model).await?
     };
 
     let config = TranscriberConfig {
@@ -233,21 +399,63 @@ async fn run_transcribe(options: TranscribeOptions) -> Result<(), CliError> {
     println!("Transcribing with model `{model}`");
     let words = transcribe_with_progress(&wav_path, &config).await?;
     println!("Transcribed {} words", words.len());
+    Ok(words)
+}
 
-    let segments = segment_words(&words, &sublayer_subtitles::SegmenterConfig::default());
+/// Runs the FFmpeg render while painting percentage, fps, and ETA on stderr.
+async fn render_with_progress(
+    input: &Path,
+    output: &Path,
+    ass_path: &Path,
+    fonts_dir: &Path,
+    options: &ExportOptions,
+) -> Result<(), CliError> {
+    let bar = ProgressBar::new(1_000);
+    bar.set_style(
+        ProgressStyle::with_template("{msg} [{bar:28}]")
+            .expect("static progress template is valid"),
+    );
+    bar.set_message("rendering");
 
-    let fonts_dir = resolve_fonts_dir();
-
-    let body = compile(&segments, format, &theme, &metadata, &fonts_dir)?;
-    if let Some(parent) = output
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent)?;
+    let (progress_tx, mut progress_rx) = mpsc::channel(64);
+    let render = tokio::spawn({
+        let input = input.to_path_buf();
+        let output = output.to_path_buf();
+        let ass_path = ass_path.to_path_buf();
+        let fonts_dir = fonts_dir.to_path_buf();
+        let options = options.clone();
+        async move {
+            run_export(
+                &input,
+                &output,
+                &ass_path,
+                &fonts_dir,
+                &options,
+                progress_tx,
+            )
+            .await
+        }
+    });
+    while let Some(progress) = progress_rx.recv().await {
+        bar.set_position((progress.percentage * 1_000.0).round() as u64);
+        bar.set_message(format!(
+            "rendering · {:.1} fps · ETA {}",
+            progress.current_fps,
+            format_duration(progress.eta_seconds)
+        ));
     }
-    std::fs::write(&output, body)?;
-    println!("Wrote {}", output.display());
+    bar.finish_and_clear();
+
+    render
+        .await
+        .map_err(|error| CliError::TaskJoin(error.to_string()))??;
     Ok(())
+}
+
+/// Formats a duration in seconds as `MM:SS`.
+fn format_duration(seconds: f64) -> String {
+    let seconds = seconds.max(0.0).round() as u64;
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
 /// Drives transcription while painting an indicatif progress bar on stderr.
@@ -390,14 +598,113 @@ mod tests {
     }
 
     #[test]
-    fn render_reports_deferred_phase() {
+    fn render_defaults_and_flags() {
         let cli = Cli::try_parse_from(["sublayer", "render", "in.mp4", "-o", "out.mp4"]).unwrap();
+        let Command::Render {
+            theme,
+            subtitles,
+            encoder,
+            quality,
+            model,
+            ..
+        } = cli.command
+        else {
+            panic!("expected render command");
+        };
+        assert_eq!(theme, "tiktok-classic");
+        assert!(subtitles.is_none());
+        assert!(encoder.is_none());
+        assert_eq!(quality, 20);
+        assert_eq!(model, "base.en");
+
+        let cli = Cli::try_parse_from([
+            "sublayer",
+            "render",
+            "in.mp4",
+            "-o",
+            "out.mp4",
+            "--subtitles",
+            "subs.ass",
+            "--encoder",
+            "vaapi",
+            "--quality",
+            "18",
+        ])
+        .unwrap();
+        let Command::Render {
+            subtitles,
+            encoder,
+            quality,
+            ..
+        } = cli.command
+        else {
+            panic!("expected render command");
+        };
+        assert_eq!(subtitles.unwrap(), PathBuf::from("subs.ass"));
+        assert_eq!(encoder.as_deref(), Some("vaapi"));
+        assert_eq!(quality, 18);
+    }
+
+    #[test]
+    fn unknown_encoder_is_rejected_before_rendering() {
+        let cli = Cli::try_parse_from([
+            "sublayer",
+            "render",
+            "in.mp4",
+            "-o",
+            "out.mp4",
+            "--encoder",
+            "quantum",
+        ])
+        .unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let result = rt.block_on(run(cli));
-        assert!(matches!(result, Err(CliError::RenderDeferred)));
+        assert!(matches!(result, Err(CliError::UnknownEncoder(value)) if value == "quantum"));
+    }
+
+    #[tokio::test]
+    async fn render_end_to_end_with_prebuilt_subtitles() {
+        let directory = tempfile::tempdir().unwrap();
+        let video = directory.path().join("clip.mp4");
+        if !generate_test_video(&video) {
+            eprintln!("skipping: ffmpeg could not create the test clip");
+            return;
+        }
+        let metadata = probe_video(&video).await.unwrap();
+        let script = build_ass_script(
+            &[sublayer_core::CaptionSegment::new(vec![
+                sublayer_core::WordToken::new("hello world", 100, 900),
+            ])],
+            &preset("tiktok").unwrap(),
+            &metadata,
+            &resolve_fonts_dir(),
+        )
+        .unwrap();
+        let subtitles = directory.path().join("subs.ass");
+        std::fs::write(&subtitles, script).unwrap();
+        let output = directory.path().join("out.mp4");
+
+        let cli = Cli::try_parse_from([
+            "sublayer",
+            "render",
+            video.to_str().unwrap(),
+            "--subtitles",
+            subtitles.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--encoder",
+            "cpu",
+        ])
+        .unwrap();
+        run(cli).await.unwrap();
+
+        let rendered = probe_video(&output).await.unwrap();
+        assert!(rendered.has_audio(), "the audio track must survive");
+        let drift = rendered.duration_ms().abs_diff(metadata.duration_ms());
+        assert!(drift <= 250, "duration drifted by {drift} ms");
     }
 
     #[tokio::test]
@@ -441,7 +748,9 @@ mod tests {
             .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y"])
             .args(["-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30"])
             .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=16000"])
-            .args(["-t", "1", "-c:v", "mpeg4", "-q:v", "5", "-c:a", "pcm_s16le"])
+            .args([
+                "-t", "1", "-c:v", "mpeg4", "-q:v", "5", "-c:a", "aac", "-b:a", "64k",
+            ])
             .arg(path)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

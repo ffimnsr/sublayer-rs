@@ -72,6 +72,7 @@ export component MainWindow inherits Window {
     in property <bool> has-selection: false;
     in-out property <string> caption-text: "";
     in property <string> caption-meta: "";
+    in property <string> encoder-label: "";
     // Pixel width of the timeline lane, used for zoom-fit and waveform
     // windowing on the Rust side.
     out property <length> timeline-pixels: timeline-view.lane-pixels;
@@ -83,6 +84,7 @@ export component MainWindow inherits Window {
     callback save-requested();
     callback save-as-requested();
     callback export-requested();
+    callback export-video-requested();
     callback transcribe-requested();
     callback settings-changed(model-index: int, use-gpu: bool, use-vad: bool);
 
@@ -122,6 +124,7 @@ export component MainWindow inherits Window {
             save-requested => { root.save-requested(); }
             save-as-requested => { root.save-as-requested(); }
             export-requested => { root.export-requested(); }
+            export-video-requested => { root.export-video-requested(); }
             transcribe-requested => { root.transcribe-requested(); }
             settings-changed(model-index, use-gpu, use-vad) => {
                 root.settings-changed(model-index, use-gpu, use-vad);
@@ -227,7 +230,7 @@ export component MainWindow inherits Window {
                 }
                 Text {
                     text: root.has-project
-                        ? "Cards " + root.segments.length + " · Wheel pans · Ctrl+Wheel zooms · Drag cards to retime"
+                        ? "Cards " + root.segments.length + " · " + root.encoder-label + " · Wheel pans · Ctrl+Wheel zooms"
                         : "";
                     color: Palette.text-dim;
                     font-size: 12px;
