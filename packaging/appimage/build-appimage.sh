@@ -38,19 +38,19 @@ install -d \
 
 install -m755 target/release/sublayer-ui "$APPDIR/usr/bin/sublayer-ui"
 install -m755 target/release/sublayer "$APPDIR/usr/bin/sublayer"
-install -m644 packaging/sublayer.desktop "$APPDIR/usr/share/applications/com.sublayer.Sublayer.desktop"
-install -m644 packaging/sublayer.desktop "$APPDIR/com.sublayer.Sublayer.desktop"
-install -m644 assets/icons/hicolor/scalable/apps/com.sublayer.Sublayer.svg \
-    "$APPDIR/usr/share/icons/hicolor/scalable/apps/com.sublayer.Sublayer.svg"
-cp assets/icons/hicolor/scalable/apps/com.sublayer.Sublayer.svg "$APPDIR/com.sublayer.Sublayer.svg"
+install -m644 packaging/sublayer.desktop "$APPDIR/usr/share/applications/com.vastorigins.Sublayer.desktop"
+install -m644 packaging/sublayer.desktop "$APPDIR/com.vastorigins.Sublayer.desktop"
+install -m644 assets/icons/hicolor/scalable/apps/com.vastorigins.Sublayer.svg \
+    "$APPDIR/usr/share/icons/hicolor/scalable/apps/com.vastorigins.Sublayer.svg"
+cp assets/icons/hicolor/scalable/apps/com.vastorigins.Sublayer.svg "$APPDIR/com.vastorigins.Sublayer.svg"
 cp assets/fonts/*.ttf "$APPDIR/usr/share/sublayer/fonts/"
 install -m755 packaging/appimage/AppRun "$APPDIR/AppRun"
 
 if [ -n "$LINUXDEPLOY" ] && [ -x "$LINUXDEPLOY" ]; then
     echo "bundling host libraries with linuxdeploy"
     "$LINUXDEPLOY" --appdir "$APPDIR" \
-        --desktop-file "$APPDIR/com.sublayer.Sublayer.desktop" \
-        --icon-file "$APPDIR/com.sublayer.Sublayer.svg"
+        --desktop-file "$APPDIR/com.vastorigins.Sublayer.desktop" \
+        --icon-file "$APPDIR/com.vastorigins.Sublayer.svg"
 fi
 
 if ! command -v "$APPIMAGETOOL" >/dev/null 2>&1; then

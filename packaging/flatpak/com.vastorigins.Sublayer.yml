@@ -2,7 +2,7 @@
 #
 # Build with:
 #   flatpak-builder --user --install --force-clean build-dir \
-#       packaging/flatpak/com.sublayer.Sublayer.yml
+#       packaging/flatpak/com.vastorigins.Sublayer.yml
 #
 # Notes:
 # * `--device=dri` exposes the DRM render nodes so `sublayer-export` can probe
@@ -13,7 +13,7 @@
 #   dialogs and future preview capture.
 # * The Rust SDK extension builds the workspace; the build needs network access
 #   once to fetch the vendored crates and whisper.cpp sources.
-id: com.sublayer.Sublayer
+id: com.vastorigins.Sublayer
 runtime: org.freedesktop.Platform
 runtime-version: '24.08'
 sdk: org.freedesktop.Sdk
@@ -61,8 +61,8 @@ modules:
       - cargo build --release --locked -p sublayer-ui -p sublayer-cli
       - install -Dm755 target/release/sublayer-ui /app/bin/sublayer-ui
       - install -Dm755 target/release/sublayer /app/bin/sublayer
-      - install -Dm644 packaging/sublayer.desktop /app/share/applications/com.sublayer.Sublayer.desktop
-      - install -Dm644 assets/icons/hicolor/scalable/apps/com.sublayer.Sublayer.svg /app/share/icons/hicolor/scalable/apps/com.sublayer.Sublayer.svg
+      - install -Dm644 packaging/sublayer.desktop /app/share/applications/com.vastorigins.Sublayer.desktop
+      - install -Dm644 assets/icons/hicolor/scalable/apps/com.vastorigins.Sublayer.svg /app/share/icons/hicolor/scalable/apps/com.vastorigins.Sublayer.svg
       # Bundled caption fonts, matched through SUBLAYER_FONTS_DIR.
       - install -d /app/share/sublayer/fonts
       - install -m644 assets/fonts/*.ttf /app/share/sublayer/fonts/

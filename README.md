@@ -24,8 +24,10 @@ video ──▶ ffprobe ──▶ 16 kHz audio ──▶ Whisper (VAD + word tim
 
 ## Highlights
 
-- **Word-level transcription** with `whisper-rs` (GGML models pinned by
-  SHA-256) and an energy-based VAD pre-filter that skips silence.
+- **Word-level transcription** with whisper.cpp through the workspace's own
+  `sublayer-whisper` bindings (built on the raw `whisper-rs-sys` FFI; GGML
+  models pinned by SHA-256) and an energy-based VAD pre-filter that skips
+  silence.
 - **Caption cards** built by clustering heuristics: sentence endings, pauses,
   clause boundaries, and per-card length/duration ceilings.
 - **ASS compiler** with karaoke, word-pop, and bounce animations, plus five
@@ -152,7 +154,7 @@ flow; the UI and CLI are thin shells over the engine crates.
 | `sublayer-core` | Domain models (`Project`, `CaptionSegment`, `WordToken`, `ThemeStyle`), XDG paths, errors |
 | `sublayer-media` | FFprobe wrapper, 16 kHz audio extraction, waveform decimation, frame preview, shared FFmpeg process layer |
 | `sublayer-ai` | Model downloader with SHA-256 verification, VAD, Whisper transcription with word timestamps |
-| `sublayer-whisper` | Audited FFI boundary over whisper.cpp (the only crate allowed `unsafe`) |
+| `sublayer-whisper` | Leak-free safe bindings to whisper.cpp over the raw `whisper-rs-sys` FFI; the only crate allowed `unsafe` |
 | `sublayer-subtitles` | Word clustering, ASS/SRT/VTT compilation, theme presets and JSON I/O, font directory resolution |
 | `sublayer-export` | VA-API/NVENC/CPU probing, FFmpeg burn-in runner, progress and ETA stream |
 | `sublayer-ui` | Slint desktop studio (window, timeline, inspector, bridge to Tokio) |
@@ -191,6 +193,12 @@ graph TD
     AI --> CORE
     SUBTITLES --> CORE
 ```
+
+Whisper inference goes through `sublayer-whisper`, which wraps the raw
+`whisper-rs-sys` FFI over whisper.cpp with borrowed (never boxed) progress
+callbacks, freed-in-`Drop` pointers, and bounds-checked iteration. It is the
+single `unsafe` boundary in the workspace; every other crate compiles under
+`unsafe_code = "deny"`.
 
 Project layout:
 
@@ -235,7 +243,7 @@ Testing strategy:
 
 ```sh
 flatpak-builder --user --install --force-clean build-dir \
-    packaging/flatpak/com.sublayer.Sublayer.yml
+    packaging/flatpak/com.vastorigins.Sublayer.yml
 ```
 
 The manifest exposes `--device=dri` (VA-API), Wayland plus fallback X11,
