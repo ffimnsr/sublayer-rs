@@ -190,7 +190,7 @@ pub(crate) fn tokens_to_words(tokens: &[(String, i64, i64)]) -> Vec<WordToken> {
     let mut end_ms = 0_i64;
 
     for (text, token_start, token_end) in tokens {
-        if text.is_empty() || is_special_token(text) {
+        if text.is_empty() || is_special_token(text.trim()) {
             continue;
         }
         if text.starts_with(' ') && !parts.is_empty() {
@@ -216,7 +216,10 @@ fn flush_word(words: &mut Vec<WordToken>, parts: &mut Vec<String>, start_ms: i64
     }
     let text = parts.join("").trim().to_owned();
     parts.clear();
-    if text.is_empty() {
+    // whisper splits bracket tokens like `[BELL]` into several tokenizer
+    // pieces (`" ["`, `"Bell"`, `"]"`), so specials must also be filtered at
+    // the assembled-word level.
+    if text.is_empty() || is_special_token(&text) {
         return;
     }
     words.push(WordToken::new(
@@ -227,6 +230,9 @@ fn flush_word(words: &mut Vec<WordToken>, parts: &mut Vec<String>, start_ms: i64
 }
 
 /// Whether `text` is a whisper special token such as `[BLANK_AUDIO]`.
+///
+/// The tokenizer sometimes prefixes specials with a space (` "[BELL]"`); the
+/// trim keeps those from leaking into captions as words like `[BELL]`.
 fn is_special_token(text: &str) -> bool {
     text.starts_with('[') && text.ends_with(']')
 }
@@ -389,6 +395,43 @@ mod tests {
             (" hello".to_owned(), 0, 100),
             ("[BLANK_AUDIO]".to_owned(), 100, 100),
             ("".to_owned(), 100, 100),
+            (" world".to_owned(), 200, 400),
+        ];
+        let words = tokens_to_words(&tokens);
+
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0].text, "hello");
+        assert_eq!(words[1].text, "world");
+        assert_eq!(words[1].start_ms, 200);
+    }
+
+    #[test]
+    fn drops_special_tokens_prefixed_with_a_space() {
+        // whisper may emit specials as ` [BELL]`; regression: they used to
+        // leak through as caption words on tone-only clips.
+        let tokens = vec![
+            (" hello".to_owned(), 0, 100),
+            (" [BELL]".to_owned(), 150, 150),
+            (" world".to_owned(), 200, 400),
+        ];
+        let words = tokens_to_words(&tokens);
+
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0].text, "hello");
+        assert_eq!(words[1].text, "world");
+        assert_eq!(words[1].start_ms, 200);
+    }
+
+    #[test]
+    fn drops_special_tokens_split_across_tokenizer_pieces() {
+        // whisper emits `[BELL]` as three pieces (`" ["`, `"Bell"`, `"]"`)
+        // that only form the special at the word level; regression: it used
+        // to leak through as a caption word on tone-only clips.
+        let tokens = vec![
+            (" hello".to_owned(), 0, 100),
+            (" [".to_owned(), 150, 150),
+            ("Bell".to_owned(), 150, 150),
+            ("]".to_owned(), 150, 150),
             (" world".to_owned(), 200, 400),
         ];
         let words = tokens_to_words(&tokens);

@@ -1,0 +1,28 @@
+[package]
+name = "sublayer-cli"
+description = "Headless command-line tool for transcription, probing, and rendering"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "sublayer"
+path = "src/main.rs"
+
+[dependencies]
+sublayer-core.workspace = true
+sublayer-media.workspace = true
+sublayer-ai.workspace = true
+sublayer-subtitles.workspace = true
+clap.workspace = true
+indicatif.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -11,6 +11,8 @@ members = [
     "crates/sublayer-media",
     "crates/sublayer-ai",
     "crates/sublayer-whisper",
+    "crates/sublayer-subtitles",
+    "crates/sublayer-cli",
 ]
 
 [workspace.package]
@@ -27,6 +29,8 @@ sublayer-core = { path = "crates/sublayer-core" }
 sublayer-media = { path = "crates/sublayer-media" }
 sublayer-ai = { path = "crates/sublayer-ai" }
 sublayer-whisper = { path = "crates/sublayer-whisper" }
+sublayer-subtitles = { path = "crates/sublayer-subtitles" }
+sublayer-cli = { path = "crates/sublayer-cli" }
 
 # Serialization & identity.
 serde = { version = "1.0", features = ["derive"] }
@@ -48,6 +52,10 @@ hound = "3.5"
 # AI speech pipeline.
 reqwest = { version = "0.13", default-features = false, features = ["stream", "rustls", "rustls-native-certs"] }
 sha2 = "0.11"
+
+# Subtitles & CLI.
+clap = { version = "4.5", features = ["derive"] }
+indicatif = "0.18"
 
 [workspace.lints.rust]
 # deny by default so every `unsafe` needs an explicit, reviewable `allow`;
