@@ -7,13 +7,24 @@
 //! Animations reuse whisper's own word timings, shifted to the card's local
 //! timeline — libass applies each override block the moment its clock reaches
 //! the word's start, so the pop/bounce lands on the spoken word even though
-//! the whole card is one `Dialogue` line:
+//! the whole card is one `Dialogue` line.
+//!
+//! Per-word animation is safe only because that line uses `\k`-style karaoke
+//! tags, which are keyed per word. Transform overrides (`\fscx`, `\1c`, …)
+//! ride the line's fill state, so during any word's pop window **every
+//! later word would animate along** — the whole caption visibly scaling
+//! together. The pop families therefore highlight the spoken word instead
+//! of scaling it:
 //!
 //! * **Karaoke** — `{\k}` sweep keyed to the word duration; the Secondary
 //!   Colour (set to the theme's highlight) fills over the base colour.
-//! * **WordPop** — the spoken word scales up to 115 % over 80 ms and settles
-//!   back, while its colour fades from highlight to the base colour.
-//! * **Bounce** — same idea with a springier three-phase overshoot.
+//! * **WordPop** — `{\K}` instant fill: the spoken word snaps into the
+//!   highlight for exactly its duration and snaps back.
+//! * **Bounce** — `{\k}` sweep like karaoke; kept as a preset-pickable
+//!   variant that does not scale the line.
+//!
+//! Layout: the card is auto-fitted (never wrapped, `WrapStyle: 2`) so the
+//! whole line lands on one baseline; karaoke fills change no geometry.
 //!
 //! When `fonts_dir` is non-empty, a `[Fonts]` section pins libass to the
 //! bundled font directory so rendering is deterministic across systems.
@@ -183,7 +194,6 @@ fn dialogue_text(
     fitted_size: u32,
     font_size: u32,
 ) -> String {
-    let line_start = segment.start_ms().unwrap_or(0);
     let mut out = String::new();
     // One override before the first word scales the whole card; the per-word
     // animation tags stay relative to whatever size is current.
@@ -198,11 +208,11 @@ fn dialogue_text(
                 out.push_str(&word_text(word, theme));
             }
             AnimationType::WordPop => {
-                out.push_str(&pop_tags(word, line_start, theme));
+                out.push_str(&format!("{{\\K{}}}", karaoke_cs(word)));
                 out.push_str(&word_text(word, theme));
             }
             AnimationType::Bounce => {
-                out.push_str(&bounce_tags(word, line_start, theme));
+                out.push_str(&format!("{{\\k{}}}", karaoke_cs(word)));
                 out.push_str(&word_text(word, theme));
             }
         }
@@ -225,41 +235,6 @@ fn word_text(word: &WordToken, theme: &ThemeStyle) -> String {
 /// visible word.
 fn karaoke_cs(word: &WordToken) -> u64 {
     (word.duration_ms() / 10).clamp(1, 6000)
-}
-
-/// Word-pop override: the word sits in the base colour until its start,
-/// springs out to 115 % and colour-shifts to the highlight over 80 ms, then
-/// settles back to the base scale and colour by `start + 200 ms`.
-///
-/// Both transforms ride inside the same `\t` ranges, so libass interpolates
-/// scale and colour together; outside its window the word is untouched (base
-/// colour, 100 % scale).
-fn pop_tags(word: &WordToken, line_start_ms: u64, theme: &ThemeStyle) -> String {
-    let start = word.start_ms.saturating_sub(line_start_ms);
-    let grow = start + 80;
-    let settle = start + 200;
-    format!(
-        "{{\\1c{base}\\t({start},{grow},\\fscx115\\fscy115\\1c{highlight}&)\\t({grow},{settle},\\fscx100\\fscy100\\1c{base}&)}}",
-        highlight = ass_color(theme.highlight_color),
-        base = ass_color(theme.primary_color),
-    )
-}
-
-/// Bounce override: the word sits in the base colour until its start, then
-/// springs through 125 % peak and an undershoot trough before settling; the
-/// colour rides the first phase up to the highlight and fades back to base
-/// during the settle.
-fn bounce_tags(word: &WordToken, line_start_ms: u64, theme: &ThemeStyle) -> String {
-    let start = word.start_ms.saturating_sub(line_start_ms);
-    let peak = start + 50;
-    let trough = start + 130;
-    let overshoot = start + 200;
-    let settle = start + 280;
-    format!(
-        "{{\\1c{base}\\t({start},{peak},\\fscx125\\fscy125\\1c{highlight}&)\\t({peak},{trough},\\fscx95\\fscy95)\\t({trough},{overshoot},\\fscx105\\fscy105)\\t({overshoot},{settle},\\fscx100\\fscy100\\1c{base}&)}}",
-        highlight = ass_color(theme.highlight_color),
-        base = ass_color(theme.primary_color),
-    )
 }
 
 /// Formats milliseconds as `H:MM:SS.cc` (ASS centisecond timestamps).
@@ -412,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn word_pop_lines_spring_the_spoken_word() {
+    fn word_pop_lines_highlight_the_spoken_word() {
         let theme = themes::hormozi_bold();
         let script = build_ass_script(
             &[segment(&["Go"])],
@@ -421,40 +396,33 @@ mod tests {
             Path::new(""),
         )
         .unwrap();
-        assert!(script.contains(
-            "{\\1c&H00FFFFFF\\t(0,80,\\fscx115\\fscy115\\1c&H0000D4FF&)\\t(80,200,\\fscx100\\fscy100\\1c&H00FFFFFF&)}GO"
-        ));
+        // The 400 ms word gets an instant `\K` fill of 40 cs: the word snaps
+        // into the highlight (the style's SecondaryColour) for its duration.
+        assert!(script.contains("Dialogue: 0,0:00:00.00,0:00:00.40,Caption,,0,0,0,,{\\K40}GO"));
     }
 
     #[test]
-    fn future_words_stay_in_base_colour_until_their_pop() {
-        // The second word's override must not paint it with the highlight
-        // before its own start: the `\1c` before its `\t` window is the
-        // base colour and the highlight only enters at its word start.
-        let theme = themes::hormozi_bold();
-        let script = build_ass_script(
-            &[segment(&["Hello", "world!"])],
-            &theme,
-            &metadata(1080, 1920),
-            Path::new(""),
-        )
-        .unwrap();
-        assert!(script.contains("{\\1c&H00FFFFFF\\t(500,580,\\fscx115\\fscy115\\1c&H0000D4FF&)"));
-    }
-
-    #[test]
-    fn bounce_lines_overshoot_in_three_phases() {
-        let theme = themes::tiktok_classic();
-        let script = build_ass_script(
-            &[segment(&["Yes"])],
-            &theme,
-            &metadata(1080, 1920),
-            Path::new(""),
-        )
-        .unwrap();
-        assert!(script.contains(
-            "{\\1c&H00FFFFFF\\t(0,50,\\fscx125\\fscy125\\1c&H00552CFE&)\\t(50,130,\\fscx95\\fscy95)\\t(130,200,\\fscx105\\fscy105)\\t(200,280,\\fscx100\\fscy100\\1c&H00FFFFFF&)}YES"
-        ));
+    fn pop_lines_never_scale_the_whole_caption() {
+        // Regression: a `\t`/`\fscx` override on one word of a single
+        // Dialogue line animates every later word along with it, so the whole
+        // caption grew in unison. Pop families must stay fill-only.
+        for theme in [themes::hormozi_bold(), themes::tiktok_classic()] {
+            let script = build_ass_script(
+                &[segment(&["Hello", "world!"])],
+                &theme,
+                &metadata(1080, 1920),
+                Path::new(""),
+            )
+            .unwrap();
+            assert!(!script.contains(r"\fscx"), "{theme:?}: no scale overrides");
+            assert!(!script.contains(r"\t("), "{theme:?}: no animated overrides");
+            let fill = if theme.animation == AnimationType::WordPop {
+                "{\\K40}HELLO {\\K40}WORLD!"
+            } else {
+                "{\\k40}HELLO {\\k40}WORLD!"
+            };
+            assert!(script.contains(fill), "{theme:?}: per-word fill");
+        }
     }
 
     #[test]

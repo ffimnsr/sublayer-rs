@@ -87,6 +87,24 @@ fn session_with_cards() -> Session {
     session
 }
 
+/// Six-word card with real-word spacing (pauses between words), as produced
+/// by whisper: adjacent words abut exactly, later words carry real pauses.
+fn session_with_word_card() -> Session {
+    let mut project = Project::new("clip", "/tmp/clip.mp4", metadata(10_000));
+    project.segments = vec![CaptionSegment::new(vec![
+        WordToken::new("whoo", 1_000, 1_200),
+        WordToken::new("hoo!", 1_200, 1_800),
+        WordToken::new("gold", 1_820, 1_990),
+        WordToken::new("number", 2_140, 2_270),
+        WordToken::new("one!", 2_380, 2_560),
+        WordToken::new("yeah", 2_740, 2_930),
+    ])];
+    let preset = crate::adapters::preset_index_of(&project.theme.name);
+    let mut session = Session::default();
+    session.install_video(project, preset);
+    session
+}
+
 #[test]
 fn empty_window_shows_the_idle_state() {
     let (ui, models) = window();
@@ -178,6 +196,46 @@ fn loaded_project_reaches_every_panel() {
     assert!(!ui.get_show_caption());
     assert_eq!(ui.get_preview_timecode().as_str(), "00:00.000");
     assert_eq!(ui.get_buckets().row_count(), 0);
+}
+
+#[test]
+fn word_pop_follows_the_playhead_through_a_real_word_card() {
+    let (ui, models) = window();
+    let mut session = session_with_word_card();
+
+    // Sweep the playhead through the card; at every word's midpoint exactly
+    // that word is active, past words have returned to the primary color.
+    let midpoints = [
+        (1_100, 0),
+        (1_500, 1),
+        (1_900, 2),
+        (2_200, 3),
+        (2_450, 4),
+        (2_850, 5),
+    ];
+    for (playhead, expected_active) in midpoints {
+        session.set_playhead(playhead);
+        refresh_playhead(&ui, &session, &models);
+        let words = ui.get_caption_words();
+        assert_eq!(words.row_count(), 6, "all words of the card are shown");
+        for index in 0..6 {
+            let active = words.row_data(index).unwrap().active;
+            assert_eq!(
+                active,
+                index == expected_active,
+                "playhead {playhead} ms, word {index} active"
+            );
+        }
+    }
+
+    // A pause between words leaves the previous word inactive.
+    session.set_playhead(2_100);
+    refresh_playhead(&ui, &session, &models);
+    let words = ui.get_caption_words();
+    assert_eq!(words.row_count(), 6);
+    for index in 0..6 {
+        assert!(!words.row_data(index).unwrap().active, "word {index}");
+    }
 }
 
 #[test]
