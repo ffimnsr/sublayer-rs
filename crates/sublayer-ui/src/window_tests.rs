@@ -16,11 +16,11 @@ use sublayer_core::{CaptionSegment, Project, VideoMetadata, WordToken};
 use sublayer_media::{WaveformBucket, WaveformCache};
 
 use crate::MainWindow;
-use crate::app::{App, with_video_extension};
+use crate::app::{App, project_name_from_stem, with_video_extension};
 use crate::session::Session;
 use crate::views::{
-    UiModels, install_static_options, refresh_document, refresh_encoder, refresh_playhead,
-    refresh_segments, refresh_task, refresh_theme, refresh_timeline,
+    UiModels, install_static_options, refresh_caption_drawer, refresh_document, refresh_encoder,
+    refresh_playhead, refresh_segments, refresh_task, refresh_theme, refresh_timeline,
 };
 
 thread_local! {
@@ -94,7 +94,7 @@ fn empty_window_shows_the_idle_state() {
     refresh_task(&ui, &session);
     refresh_document(&ui, &session);
     refresh_segments(&ui, &session, &models);
-    refresh_playhead(&ui, &session);
+    refresh_playhead(&ui, &session, &models);
     refresh_timeline(&ui, &session, &models);
 
     assert!(!ui.get_has_project());
@@ -156,7 +156,7 @@ fn loaded_project_reaches_every_panel() {
     refresh_document(&ui, &session);
     refresh_theme(&ui, &session);
     refresh_segments(&ui, &session, &models);
-    refresh_playhead(&ui, &session);
+    refresh_playhead(&ui, &session, &models);
     refresh_timeline(&ui, &session, &models);
 
     assert!(ui.get_has_project());
@@ -180,10 +180,10 @@ fn loaded_project_reaches_every_panel() {
 
 #[test]
 fn playhead_selects_the_matching_caption() {
-    let (ui, _models) = window();
+    let (ui, models) = window();
     let mut session = session_with_cards();
     session.set_playhead(1_500);
-    refresh_playhead(&ui, &session);
+    refresh_playhead(&ui, &session, &models);
 
     assert!(ui.get_show_caption());
     assert_eq!(ui.get_active_caption().as_str(), "hello");
@@ -191,8 +191,34 @@ fn playhead_selects_the_matching_caption() {
 
     // Between the two cards the overlay disappears again.
     session.set_playhead(2_500);
-    refresh_playhead(&ui, &session);
+    refresh_playhead(&ui, &session, &models);
     assert!(!ui.get_show_caption());
+}
+
+#[test]
+fn fixture_video_stems_do_not_leak_into_the_project_name() {
+    // Opening `test_assets/test.webm` once showed the header as
+    // "SUBlayer · test", which read like a test build of the app itself.
+    // Fixture-lookalike stems fall back to the untitled placeholder.
+    for stem in [
+        "test", "Test", "clip", "sample", "demo", "example", "untitled",
+    ] {
+        assert_eq!(
+            project_name_from_stem(stem),
+            None,
+            "{stem:?} should be filtered"
+        );
+    }
+    // Real footage keeps its file name as the project name.
+    assert_eq!(
+        project_name_from_stem("vacation_2026").as_deref(),
+        Some("vacation_2026")
+    );
+    assert_eq!(
+        project_name_from_stem("my-test-clip").as_deref(),
+        Some("my-test-clip")
+    );
+    assert_eq!(project_name_from_stem("  "), None);
 }
 
 #[test]
@@ -281,4 +307,160 @@ fn dragging_a_caption_card_retimes_it_through_the_ui() {
     let row = ui.get_segments().row_data(0).unwrap();
     assert_eq!(row.start_ms, segment.start_ms().unwrap() as i32);
     assert!(row.selected);
+}
+
+#[test]
+fn preview_pops_the_word_under_the_playhead() {
+    let (ui, models) = window();
+    let mut project = project_with_cards();
+    project.segments = vec![CaptionSegment::new(vec![
+        WordToken::new("hello", 1_000, 1_400),
+        WordToken::new("there", 1_500, 1_900),
+    ])];
+    let preset = crate::adapters::preset_index_of(&project.theme.name);
+    let mut session = Session::default();
+    session.install_video(project, preset);
+
+    session.set_playhead(1_100);
+    refresh_playhead(&ui, &session, &models);
+    let words = ui.get_caption_words();
+    assert_eq!(words.row_count(), 2);
+    assert_eq!(words.row_data(0).unwrap().text.as_str(), "hello");
+    assert!(words.row_data(0).unwrap().active);
+    assert!(!words.row_data(1).unwrap().active);
+
+    session.set_playhead(1_700);
+    refresh_playhead(&ui, &session, &models);
+    assert!(!ui.get_caption_words().row_data(0).unwrap().active);
+    assert!(ui.get_caption_words().row_data(1).unwrap().active);
+
+    // Outside every card no overlay words are shown.
+    session.set_playhead(2_500);
+    refresh_playhead(&ui, &session, &models);
+    assert_eq!(ui.get_caption_words().row_count(), 0);
+}
+
+#[test]
+fn drawer_lists_cards_and_toggles_visibility() {
+    let (ui, models) = window();
+    let mut session = session_with_cards();
+    session.select(0);
+    refresh_segments(&ui, &session, &models);
+
+    assert!(!ui.get_caption_drawer_open());
+    assert_eq!(ui.get_caption_rows().row_count(), 2);
+    let first = ui.get_caption_rows().row_data(0).unwrap();
+    assert_eq!(first.label.as_str(), "00:01.000 → 00:02.000");
+    assert_eq!(first.text.as_str(), "hello");
+    assert!(first.selected);
+    assert!(!ui.get_caption_rows().row_data(1).unwrap().selected);
+
+    session.caption_drawer_open = true;
+    refresh_caption_drawer(&ui, &session, &models);
+    assert!(ui.get_caption_drawer_open());
+}
+
+#[test]
+fn drawer_edits_update_the_project_and_the_timeline() {
+    let (ui, models) = window();
+    let mut session = session_with_cards();
+    refresh_segments(&ui, &session, &models);
+
+    assert!(session.set_segment_text(1, "buddy"));
+    refresh_segments(&ui, &session, &models);
+
+    assert_eq!(
+        ui.get_caption_rows().row_data(1).unwrap().text.as_str(),
+        "buddy"
+    );
+    assert_eq!(
+        ui.get_segments().row_data(1).unwrap().text.as_str(),
+        "buddy"
+    );
+}
+
+#[test]
+fn empty_project_shows_no_drawer_rows() {
+    let (ui, models) = window();
+    let session = Session::default();
+    refresh_segments(&ui, &session, &models);
+    assert_eq!(ui.get_caption_rows().row_count(), 0);
+}
+
+#[test]
+fn right_click_on_the_timeline_inserts_a_caption_at_that_time() {
+    // A full `App` so the real callbacks are wired; see the drag test.
+    ensure_platform();
+    let app = App::new().expect("the studio must build headlessly");
+    let ui = app.window();
+    ui.window().set_size(PhysicalSize::new(1320, 860));
+    {
+        let mut session = app.session().borrow_mut();
+        session.install_video(project_with_cards(), 0);
+    }
+    app.refresh();
+
+    // Right-click the empty lane: the menu opens where the press lands. The
+    // testing backend starts every gesture at the element's center, so the
+    // expected time is the lane center through the session's pixel scale.
+    let lane = ElementQuery::from_root(ui)
+        .match_predicate(|element| {
+            element
+                .id()
+                .is_some_and(|id| id == "lane-touch" || id.ends_with("::lane-touch"))
+        })
+        .find_all()
+        .pop()
+        .expect("the lane touch area must be addressable");
+    let expected_ms = (f64::from(lane.size().width) / 2.0 * 1_000.0
+        / f64::from(app.session().borrow().pixels_per_second)) as u64;
+    lane.mock_drag(
+        LogicalPosition::new(
+            lane.absolute_position().x + lane.size().width / 2.0,
+            lane.absolute_position().y + lane.size().height / 2.0,
+        ),
+        PointerEventButton::Right,
+    );
+
+    // Click the menu's "Add caption" button.
+    let button = ElementQuery::from_root(ui)
+        .match_predicate(|element| {
+            element.id().is_some_and(|id| {
+                id == "add-caption-button" || id.ends_with("::add-caption-button")
+            })
+        })
+        .find_all()
+        .pop()
+        .expect("the add-caption button must be addressable");
+    let button_center = LogicalPosition::new(
+        button.absolute_position().x + button.size().width / 2.0,
+        button.absolute_position().y + button.size().height / 2.0,
+    );
+    button.mock_drag(button_center, PointerEventButton::Left);
+
+    let session = app.session().borrow();
+    let project = session.project.as_ref().expect("project must be open");
+    assert_eq!(project.segments.len(), 3, "a card must have been inserted");
+    let (selected, segment) = session.selected_segment().expect("inserted card selected");
+    assert_eq!(selected, 2);
+    assert_eq!(segment.text(), "New caption");
+    assert!(
+        (segment.start_ms().unwrap() as i64 - expected_ms as i64).abs() <= 10,
+        "inserted at {} ms, expected ~{expected_ms}",
+        segment.start_ms().unwrap()
+    );
+    assert_eq!(
+        segment.end_ms().unwrap() - segment.start_ms().unwrap(),
+        2_000,
+        "default duration"
+    );
+    // Cards stay sorted by time, and the window models show the new card.
+    assert!(
+        project
+            .segments
+            .windows(2)
+            .all(|pair| { pair[0].start_ms().unwrap() <= pair[1].start_ms().unwrap() })
+    );
+    assert_eq!(ui.get_segments().row_count(), 3);
+    assert_eq!(ui.get_caption_rows().row_count(), 3);
 }

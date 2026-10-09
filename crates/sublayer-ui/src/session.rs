@@ -143,6 +143,8 @@ pub struct Session {
     pub render_fallbacks: Vec<HardwareEncoder>,
     /// x264 CRF / NVENC & VA-API quality for renders.
     pub render_quality: u8,
+    /// Whether the captions drawer is visible.
+    pub caption_drawer_open: bool,
     /// Running task indicator.
     pub task: TaskState,
     /// Preview decoder state.
@@ -168,6 +170,7 @@ impl Default for Session {
             render_encoder: HardwareEncoder::Cpu,
             render_fallbacks: Vec::new(),
             render_quality: 20,
+            caption_drawer_open: false,
             task: TaskState::default(),
             preview: PreviewState::default(),
             drag: None,
@@ -250,6 +253,36 @@ impl Session {
         let (start_ms, end_ms) = (segment_start(segment), segment_end(segment));
         segment.words = vec![WordToken::new(text, start_ms, end_ms)];
         project.touch();
+        true
+    }
+
+    /// Default duration of a manually inserted caption card.
+    pub const DEFAULT_CAPTION_DURATION_MS: u64 = 2_000;
+
+    /// Inserts a placeholder caption card at `ms`, keeping the cards sorted by
+    /// time, and selects it. Returns `true` when a project is open.
+    pub fn add_caption(&mut self, ms: u64) -> bool {
+        let (index, start) = {
+            let Some(project) = self.project.as_mut() else {
+                return false;
+            };
+            let duration = project.video_metadata.duration_ms();
+            let start = ms.min(duration.saturating_sub(1));
+            let end = (start + Self::DEFAULT_CAPTION_DURATION_MS)
+                .min(duration)
+                .max(start + 1);
+            let card = CaptionSegment::new(vec![WordToken::new("New caption", start, end)]);
+            let index = project
+                .segments
+                .iter()
+                .position(|other| other.start_ms().unwrap_or(0) > start)
+                .unwrap_or(project.segments.len());
+            project.segments.insert(index, card);
+            project.touch();
+            (index, start)
+        };
+        self.selected = Some(index);
+        self.set_playhead(start);
         true
     }
 
@@ -830,6 +863,42 @@ mod tests {
         session.install_video(project_with_segments(&[(0, 500)]), 0);
         assert_eq!(session.preview_ready(token, 0), PreviewOutcome::Idle);
         assert_eq!(session.preview.shown_ms, None);
+    }
+
+    #[test]
+    fn adding_a_caption_keeps_cards_sorted_and_clamped() {
+        // 30 s project; insert between the existing cards, before them, at the
+        // very end, and without a project.
+        let mut session = session_with(&[(1_000, 2_000), (20_000, 21_000)]);
+
+        assert!(session.add_caption(5_000));
+        let starts: Vec<u64> = session
+            .project
+            .as_ref()
+            .unwrap()
+            .segments
+            .iter()
+            .map(|segment| segment.start_ms().unwrap())
+            .collect();
+        assert_eq!(starts, vec![1_000, 5_000, 20_000]);
+        assert_eq!(session.selected, Some(1));
+        assert_eq!(session.playhead_ms, 5_000);
+
+        // The card at the end is clamped to the video duration.
+        assert!(session.add_caption(29_500));
+        let (_, segment) = session.selected_segment().unwrap();
+        assert_eq!(segment.start_ms(), Some(29_500));
+        assert_eq!(segment.end_ms(), Some(30_000));
+        assert_eq!(segment.text(), "New caption");
+
+        // Past-the-end positions clamp onto the last millisecond.
+        assert!(session.add_caption(60_000));
+        let (_, segment) = session.selected_segment().unwrap();
+        assert_eq!(segment.start_ms(), Some(29_999));
+        assert!(segment.end_ms().unwrap() > segment.start_ms().unwrap());
+
+        let mut bare = Session::default();
+        assert!(!bare.add_caption(0));
     }
 
     #[test]

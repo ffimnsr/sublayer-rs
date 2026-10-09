@@ -19,8 +19,8 @@ use crate::bridge::{Bridge, TranscribeRequest, UiEvent, model_names};
 use crate::error::UiError;
 use crate::session::{DragMode, PreviewOutcome, Session};
 use crate::views::{
-    UiModels, install_static_options, refresh_document, refresh_encoder, refresh_playhead,
-    refresh_segments, refresh_task, refresh_theme, refresh_timeline,
+    UiModels, install_static_options, refresh_caption_drawer, refresh_document, refresh_encoder,
+    refresh_playhead, refresh_segments, refresh_task, refresh_theme, refresh_timeline,
 };
 use crate::{MainWindow, ThemeData};
 
@@ -140,7 +140,7 @@ impl App {
         refresh_task(&self.ui, &session);
         refresh_document(&self.ui, &session);
         refresh_segments(&self.ui, &session, models);
-        refresh_playhead(&self.ui, &session);
+        refresh_playhead(&self.ui, &session, models);
         refresh_timeline(&self.ui, &session, models);
         refresh_encoder(&self.ui, &session);
     }
@@ -304,12 +304,13 @@ fn wire_callbacks(
         let bridge = bridge.clone();
         let session = Rc::clone(session);
         let weak = weak.clone();
+        let models = Rc::clone(&models);
         ui.on_seek(move |ms| {
             {
                 let mut guard = session.borrow_mut();
                 guard.set_playhead(ms.max(0) as u64);
                 if let Some(ui) = weak.upgrade() {
-                    refresh_playhead(&ui, &guard);
+                    refresh_playhead(&ui, &guard, &models);
                 }
             }
             request_preview(&bridge, &session);
@@ -399,7 +400,7 @@ fn wire_callbacks(
             {
                 let session = session.borrow();
                 refresh_segments(&ui, &session, &models);
-                refresh_playhead(&ui, &session);
+                refresh_playhead(&ui, &session, &models);
                 refresh_timeline(&ui, &session, &models);
             }
             request_preview(&bridge, &session);
@@ -443,6 +444,7 @@ fn wire_callbacks(
     {
         let session = Rc::clone(session);
         let weak = weak.clone();
+        let models = Rc::clone(&models);
         ui.on_theme_edited(move |data: ThemeData| {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -461,7 +463,7 @@ fn wire_callbacks(
                 }
             }
             refresh_theme(&ui, &session.borrow());
-            refresh_playhead(&ui, &session.borrow());
+            refresh_playhead(&ui, &session.borrow(), &models);
         });
     }
     {
@@ -496,6 +498,106 @@ fn wire_callbacks(
             if deleted && let Some(ui) = weak.upgrade() {
                 refresh_segments(&ui, &session.borrow(), &models);
             }
+        });
+    }
+
+    // --- Captions drawer ----------------------------------------------------
+    {
+        let session = Rc::clone(session);
+        let weak = weak.clone();
+        let models = Rc::clone(&models);
+        ui.on_caption_drawer_toggled(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            {
+                let mut session = session.borrow_mut();
+                session.caption_drawer_open = !session.caption_drawer_open;
+            }
+            refresh_caption_drawer(&ui, &session.borrow(), &models);
+        });
+    }
+    {
+        let session = Rc::clone(session);
+        let weak = weak.clone();
+        let models = Rc::clone(&models);
+        let bridge = bridge.clone();
+        ui.on_caption_row_selected(move |index: i32| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            {
+                let mut session = session.borrow_mut();
+                if !session.select(index.max(0) as usize) {
+                    return;
+                }
+                let start = session
+                    .selected_segment()
+                    .and_then(|(_, segment)| segment.start_ms())
+                    .unwrap_or(0);
+                session.set_playhead(start);
+            }
+            {
+                let session = session.borrow();
+                refresh_segments(&ui, &session, &models);
+                refresh_playhead(&ui, &session, &models);
+                refresh_timeline(&ui, &session, &models);
+            }
+            request_preview(&bridge, &session);
+        });
+    }
+    {
+        let session = Rc::clone(session);
+        let weak = weak.clone();
+        let models = Rc::clone(&models);
+        ui.on_caption_drawer_toggled(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            {
+                let mut session = session.borrow_mut();
+                session.caption_drawer_open = !session.caption_drawer_open;
+            }
+            refresh_caption_drawer(&ui, &session.borrow(), &models);
+        });
+    }
+    {
+        let session = Rc::clone(session);
+        let weak = weak.clone();
+        let models = Rc::clone(&models);
+        ui.on_caption_row_edited(move |index: i32, text: SharedString| {
+            let changed = session
+                .borrow_mut()
+                .set_segment_text(index.max(0) as usize, text.as_str());
+            if changed && let Some(ui) = weak.upgrade() {
+                refresh_segments(&ui, &session.borrow(), &models);
+                refresh_playhead(&ui, &session.borrow(), &models);
+            }
+        });
+    }
+    // --- Timeline right-click -------------------------------------------------
+    {
+        let session = Rc::clone(session);
+        let weak = weak.clone();
+        let models = Rc::clone(&models);
+        let bridge = bridge.clone();
+        ui.on_add_caption_requested(move |ms: i32| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            {
+                let mut session = session.borrow_mut();
+                if !session.add_caption(ms.max(0) as u64) {
+                    return;
+                }
+            }
+            {
+                let session = session.borrow();
+                refresh_segments(&ui, &session, &models);
+                refresh_playhead(&ui, &session, &models);
+                refresh_timeline(&ui, &session, &models);
+            }
+            request_preview(&bridge, &session);
         });
     }
 }
@@ -598,7 +700,7 @@ fn handle_event(
         } => {
             let name = video_path
                 .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
+                .and_then(|stem| project_name_from_stem(&stem.to_string_lossy()))
                 .unwrap_or_else(|| "Untitled project".to_owned());
             let project = Project::new(name, video_path.clone(), metadata);
             let preset_index = adapters::preset_index_of(&project.theme.name);
@@ -610,7 +712,7 @@ fn handle_event(
             refresh_document(ui, &session.borrow());
             refresh_theme(ui, &session.borrow());
             refresh_segments(ui, &session.borrow(), models);
-            refresh_playhead(ui, &session.borrow());
+            refresh_playhead(ui, &session.borrow(), models);
             refresh_timeline(ui, &session.borrow(), models);
             request_preview(bridge, session);
         }
@@ -628,7 +730,7 @@ fn handle_event(
                 session.selected = None;
             }
             refresh_segments(ui, &session.borrow(), models);
-            refresh_playhead(ui, &session.borrow());
+            refresh_playhead(ui, &session.borrow(), models);
         }
         UiEvent::PreviewReady {
             token,
@@ -664,7 +766,7 @@ fn handle_event(
             refresh_document(ui, &session.borrow());
             refresh_theme(ui, &session.borrow());
             refresh_segments(ui, &session.borrow(), models);
-            refresh_playhead(ui, &session.borrow());
+            refresh_playhead(ui, &session.borrow(), models);
             refresh_timeline(ui, &session.borrow(), models);
 
             if video_path.is_file() {
@@ -758,6 +860,21 @@ fn zoom_step(
         session.zoom_by(factor, viewport_px);
     }
     refresh_timeline(&ui, &session.borrow(), models);
+}
+
+/// Display name for a project opened from a video file.
+///
+/// Stems that are almost certainly playground assets (`test`, `sample`, …)
+/// fall back to the untitled placeholder so the header never advertises a
+/// test build; real footage keeps its file name. The save dialog still
+/// proposes the raw stem via [`default_project_name`].
+pub(crate) fn project_name_from_stem(stem: &str) -> Option<String> {
+    const FIXTURE_STEMS: &[&str] = &["test", "clip", "sample", "demo", "example", "untitled"];
+    let trimmed = stem.trim().to_ascii_lowercase();
+    if trimmed.is_empty() || FIXTURE_STEMS.contains(&trimmed.as_str()) {
+        return None;
+    }
+    Some(stem.trim().to_owned())
 }
 
 /// Default file name offered by the save/export dialogs.

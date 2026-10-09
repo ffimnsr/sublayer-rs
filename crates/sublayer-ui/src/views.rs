@@ -23,6 +23,10 @@ pub(crate) struct UiModels {
     pub(crate) segments: Rc<VecModel<SegmentItem>>,
     /// Aggregated waveform columns.
     pub(crate) buckets: Rc<VecModel<BucketItem>>,
+    /// Rows of the captions drawer.
+    pub(crate) caption_rows: Rc<VecModel<crate::CaptionRow>>,
+    /// Words of the caption shown over the preview frame.
+    pub(crate) caption_words: Rc<VecModel<crate::CaptionWord>>,
 }
 
 impl UiModels {
@@ -31,6 +35,8 @@ impl UiModels {
         Self {
             segments: Rc::new(VecModel::default()),
             buckets: Rc::new(VecModel::default()),
+            caption_rows: Rc::new(VecModel::default()),
+            caption_words: Rc::new(VecModel::default()),
         }
     }
 
@@ -38,6 +44,8 @@ impl UiModels {
     pub(crate) fn attach(&self, ui: &MainWindow) {
         ui.set_segments(ModelRc::new(self.segments.clone()));
         ui.set_buckets(ModelRc::new(self.buckets.clone()));
+        ui.set_caption_rows(ModelRc::new(self.caption_rows.clone()));
+        ui.set_caption_words(ModelRc::new(self.caption_words.clone()));
     }
 }
 
@@ -155,10 +163,25 @@ pub(crate) fn refresh_segments(ui: &MainWindow, session: &Session, models: &UiMo
             );
         }
     }
+    refresh_caption_drawer(ui, session, models);
 }
 
-/// Pushes the playhead, timecode, and the caption shown over the frame.
-pub(crate) fn refresh_playhead(ui: &MainWindow, session: &Session) {
+/// Pushes the captions drawer: its visibility and its rows.
+pub(crate) fn refresh_caption_drawer(ui: &MainWindow, session: &Session, models: &UiModels) {
+    ui.set_caption_drawer_open(session.caption_drawer_open);
+    let (segments, selected) = match session.project.as_ref() {
+        Some(project) => (project.segments.as_slice(), session.selected),
+        None => (&[][..] as &[CaptionSegment], None),
+    };
+    sync_rows(
+        &models.caption_rows,
+        adapters::caption_row_items(segments, selected),
+    );
+}
+
+/// Pushes the playhead, timecode, and the word-level caption shown over the
+/// frame (the spoken word pops into the highlight color).
+pub(crate) fn refresh_playhead(ui: &MainWindow, session: &Session, models: &UiModels) {
     ui.set_playhead_ms(ui_ms(session.playhead_ms));
     ui.set_preview_timecode(adapters::format_timecode(session.playhead_ms).into());
     let caption = session
@@ -167,6 +190,12 @@ pub(crate) fn refresh_playhead(ui: &MainWindow, session: &Session) {
         .and_then(|project| adapters::caption_at(project, session.playhead_ms));
     ui.set_show_caption(caption.is_some());
     ui.set_active_caption(caption.unwrap_or_default());
+    let words = session
+        .project
+        .as_ref()
+        .and_then(|project| adapters::caption_words_at(project, session.playhead_ms))
+        .unwrap_or_default();
+    sync_rows(&models.caption_words, words);
 }
 
 /// Pushes zoom, scroll, and the waveform window.

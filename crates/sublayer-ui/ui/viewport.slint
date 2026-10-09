@@ -6,18 +6,29 @@
 
 import { Palette } from "theme.slint";
 
+// One word of the caption overlay; `active` marks the word under the
+// playhead, which pops into the highlight color while the rest stays in the
+// primary color.
+export struct CaptionWord {
+    index: int,
+    text: string,
+    active: bool,
+}
+
 export component Viewport inherits Rectangle {
     in property <image> frame;
     in property <bool> has-frame: false;
     in property <int> video-width: 0;
     in property <int> video-height: 0;
     in property <string> caption: "";
+    in property <[CaptionWord]> caption-words: [];
     in property <bool> show-caption: false;
     in property <string> timecode: "00:00.000";
     in property <string> placeholder: "Open a video to begin";
     // Theme values, applied approximately on the letterboxed preview.
     in property <int> font-size: 64;
     in property <color> primary-color: white;
+    in property <color> highlight-color: #fe2c55;
     in property <color> outline-color: black;
     in property <length> outline-width: 4px;
     in property <bool> bold: true;
@@ -45,20 +56,26 @@ export component Viewport inherits Rectangle {
     }
 
     // Caption overlay, aligned inside the fitted frame (bottom-center, like
-    // the ASS renderer's margin-V).
-    if (root.has-frame && root.show-caption && root.caption != "") : Text {
-        text: root.uppercase ? root.caption.to-uppercase() : root.caption;
+    // the ASS renderer's margin-V). Words are laid out next to each other and
+    // the word under the playhead pops into the highlight color.
+    if (root.has-frame && root.show-caption && root.caption != "") : HorizontalLayout {
         x: preview.x + root.frame-width * 0.04;
         width: root.frame-width * 0.92;
         y: preview.y + root.frame-height - self.height - (root.margin-v * root.fit-scale * 1px);
-        color: root.primary-color;
-        // A zero-width stroke still draws a hairline; hide the stroke there.
-        stroke: root.outline-width > 0px ? root.outline-color : transparent;
-        stroke-width: root.outline-width * root.fit-scale;
-        font-size: root.font-size * root.fit-scale * 1px;
-        font-weight: root.bold ? 800 : 400;
-        horizontal-alignment: center;
-        wrap: word-wrap;
+        alignment: center;
+        spacing: 5px;
+
+        for word in root.caption-words : Text {
+            text: root.uppercase ? word.text.to-uppercase() : word.text;
+            color: word.active ? root.highlight-color : root.primary-color;
+            animate color { duration: 90ms; }
+            // A zero-width stroke still draws a hairline; hide the stroke there.
+            stroke: root.outline-width > 0px ? root.outline-color : transparent;
+            stroke-width: root.outline-width * root.fit-scale;
+            font-size: root.font-size * root.fit-scale * 1px;
+            font-weight: root.bold ? (word.active ? 900 : 700) : 400;
+            horizontal-alignment: center;
+        }
     }
 
     // Playhead timecode chip.

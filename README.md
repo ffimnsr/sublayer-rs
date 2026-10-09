@@ -87,7 +87,8 @@ cargo build --release -p sublayer-ui -p sublayer-cli --features sublayer-ai/vulk
    header shows progress and the timeline fills with caption cards.
 3. **Edit** — scrub the ruler or waveform, drag cards to retime them, drag
    their edges to trim, and retype captions in the inspector. Presets and
-   style controls update the preview overlay immediately.
+   style controls update the preview overlay immediately; the overlay also
+   pops the word under the playhead in the theme's highlight color.
 4. **Export** — `Export ASS` writes the subtitle file; `Export Video` picks a
    destination and burns the captions in with the probed encoder. The status
    bar shows the render percentage, fps, and ETA, then the encoder that
@@ -96,7 +97,14 @@ cargo build --release -p sublayer-ui -p sublayer-cli --features sublayer-ai/vulk
    cards, and theme together.
 
 Timeline controls: wheel pans, `Ctrl`+wheel zooms, `−`/`+`/`Fit` adjust the
-zoom, and the ruler or waveform seeks.
+zoom, and the ruler or waveform seeks. **Right-click the timeline** to add a
+caption whisper missed: a menu offers to insert a placeholder card at that
+time, which you then retype in the inspector or the captions drawer.
+
+**Captions drawer** — the header's `Captions` button slides a timestamped,
+YouTube-style list of the caption cards in from the right. Click a row's
+timestamp to seek to and select that card, or edit the text inline; the
+drawer, the timeline, and the inspector stay in sync.
 
 ## CLI reference
 

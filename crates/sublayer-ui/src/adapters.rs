@@ -8,7 +8,7 @@ use sublayer_core::{AnimationType, CaptionSegment, Project, Rgba, ThemeStyle};
 use sublayer_media::{RgbaFrame, WaveformCache};
 use sublayer_subtitles::PRESET_NAMES;
 
-use crate::{BucketItem, SegmentItem, ThemeData};
+use crate::{BucketItem, CaptionRow, CaptionWord, SegmentItem, ThemeData};
 
 /// Caption animations in `AnimationType` declaration order, matching the
 /// inspector dropdown.
@@ -114,6 +114,48 @@ pub fn segment_items(segments: &[CaptionSegment], selected: Option<usize>) -> Ve
             selected: selected == Some(index),
         })
         .collect()
+}
+
+/// Builds the rows of the captions drawer, in timeline order.
+pub fn caption_row_items(segments: &[CaptionSegment], selected: Option<usize>) -> Vec<CaptionRow> {
+    segments
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| CaptionRow {
+            index: index as i32,
+            label: format!(
+                "{} → {}",
+                format_timecode(segment.start_ms().unwrap_or(0)),
+                format_timecode(segment.end_ms().unwrap_or(0))
+            )
+            .into(),
+            text: segment.text().into(),
+            selected: selected == Some(index),
+        })
+        .collect()
+}
+
+/// The word under `playhead_ms` of the caption at that time, with every word
+/// of the card; `active` marks the spoken one.
+pub fn caption_words_at(project: &Project, playhead_ms: u64) -> Option<Vec<CaptionWord>> {
+    let segment = project.segments.iter().find(|segment| {
+        let start = segment.start_ms().unwrap_or(0);
+        let end = segment.end_ms().unwrap_or(start).max(start + 1);
+        start <= playhead_ms && playhead_ms < end
+    })?;
+    Some(
+        segment
+            .words
+            .iter()
+            .enumerate()
+            .map(|(index, word)| CaptionWord {
+                index: index as i32,
+                text: word.text.clone().into(),
+                active: word.start_ms <= playhead_ms
+                    && playhead_ms < word.end_ms.max(word.start_ms + 1),
+            })
+            .collect(),
+    )
 }
 
 /// Aggregates `cache` into at most `columns` render columns starting at

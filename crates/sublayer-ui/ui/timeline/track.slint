@@ -4,7 +4,7 @@
 // the edge handles trim its start/end; the Rust side owns the timing math and
 // clamps the result, so the UI only reports pointer deltas.
 
-import { Palette } from "../theme.slint";
+import { Format, Palette, ToolButton } from "../theme.slint";
 
 export struct SegmentItem {
     index: int,
@@ -23,6 +23,8 @@ export component Track inherits Rectangle {
     callback seeked(ms: int);
     callback wheeled(delta-x: length, delta-y: length, zoom: bool);
     callback select(index: int);
+    // The right-click menu asks for a manually inserted caption card.
+    callback add-caption(ms: int);
     // `mode`: 0 = move, 1 = trim start, 2 = trim end. `pointer-x` is the
     // pointer's window position: the card follows it, so an item-relative
     // reading would shrink every gesture by half.
@@ -35,14 +37,29 @@ export component Track inherits Rectangle {
 
     property <length> px-per-ms: root.pixels-per-second / 1000 * 1px;
 
-    // Clicking the empty lane moves the playhead; blocks are declared after
-    // this area and therefore sit on top of it.
-    TouchArea {
+    // Right-click context menu state (pointer position in the lane).
+    in-out property <bool> menu-visible: false;
+    property <int> menu-ms: 0;
+    property <length> menu-x: 0px;
+    property <length> menu-y: 0px;
+
+    // Clicking the empty lane moves the playhead; a right click instead offers
+    // to insert a caption card at that time. Blocks are declared after this
+    // area and therefore sit on top of it.
+    lane-touch := TouchArea {
         enabled: root.enabled;
         mouse-cursor: crosshair;
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down) {
-                root.seeked(Math.round(root.scroll-ms + self.mouse-x / root.px-per-ms));
+                root.menu-visible = false;
+                if (event.button == PointerEventButton.right) {
+                    root.menu-ms = Math.round(root.scroll-ms + self.mouse-x / root.px-per-ms);
+                    root.menu-x = self.mouse-x;
+                    root.menu-y = self.mouse-y;
+                    root.menu-visible = true;
+                } else {
+                    root.seeked(Math.round(root.scroll-ms + self.mouse-x / root.px-per-ms));
+                }
             }
         }
         scroll-event(event) => {
@@ -80,8 +97,11 @@ export component Track inherits Rectangle {
             moved => { root.drag-move(self.absolute-position.x + self.mouse-x); }
             pointer-event(event) => {
                 if (event.kind == PointerEventKind.down) {
-                    root.select(segment.index);
-                    root.drag-begin(segment.index, 0, self.absolute-position.x + self.mouse-x);
+                    root.menu-visible = false;
+                    if (event.button == PointerEventButton.left) {
+                        root.select(segment.index);
+                        root.drag-begin(segment.index, 0, self.absolute-position.x + self.mouse-x);
+                    }
                 } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
                     root.drag-end();
                 }
@@ -100,8 +120,11 @@ export component Track inherits Rectangle {
             moved => { root.drag-move(self.absolute-position.x + self.mouse-x); }
             pointer-event(event) => {
                 if (event.kind == PointerEventKind.down) {
-                    root.select(segment.index);
-                    root.drag-begin(segment.index, 1, self.absolute-position.x + self.mouse-x);
+                    root.menu-visible = false;
+                    if (event.button == PointerEventButton.left) {
+                        root.select(segment.index);
+                        root.drag-begin(segment.index, 1, self.absolute-position.x + self.mouse-x);
+                    }
                 } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
                     root.drag-end();
                 }
@@ -116,10 +139,47 @@ export component Track inherits Rectangle {
             moved => { root.drag-move(self.absolute-position.x + self.mouse-x); }
             pointer-event(event) => {
                 if (event.kind == PointerEventKind.down) {
-                    root.select(segment.index);
-                    root.drag-begin(segment.index, 2, self.absolute-position.x + self.mouse-x);
+                    root.menu-visible = false;
+                    if (event.button == PointerEventButton.left) {
+                        root.select(segment.index);
+                        root.drag-begin(segment.index, 2, self.absolute-position.x + self.mouse-x);
+                    }
                 } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
                     root.drag-end();
+                }
+            }
+        }
+    }
+
+    // Right-click menu: use it to insert a caption whisper missed. It is the
+    // last child, so it renders above the cards and the lane.
+    context-menu := Rectangle {
+        visible: root.menu-visible;
+        x: min(root.menu-x, parent.width - 224px);
+        y: min(root.menu-y, parent.height - 76px);
+        width: 224px;
+        height: 76px;
+        background: Palette.raised;
+        border-radius: Palette.radius;
+        border-width: 1px;
+        border-color: Palette.border;
+
+        VerticalLayout {
+            padding: 8px;
+            spacing: 4px;
+
+            Text {
+                text: "Whisper missed this? Add it manually.";
+                color: Palette.text-dim;
+                font-size: 11px;
+                overflow: elide;
+            }
+            add-caption-button := ToolButton {
+                text: "Add caption @ " + Format.timecode(root.menu-ms);
+                filled: true;
+                clicked => {
+                    root.add-caption(root.menu-ms);
+                    root.menu-visible = false;
                 }
             }
         }

@@ -5,11 +5,12 @@
 
 import { Format, Palette } from "theme.slint";
 import { Header } from "header.slint";
+import { CaptionRow, CaptionsDrawer } from "captions.slint";
 import { Inspector, ThemeData } from "inspector.slint";
 import { BucketItem } from "timeline/waveform.slint";
 import { SegmentItem } from "timeline/track.slint";
 import { Timeline } from "timeline/timeline.slint";
-import { Viewport } from "viewport.slint";
+import { CaptionWord, Viewport } from "viewport.slint";
 
 export component MainWindow inherits Window {
     title: "Sublayer — Caption Studio";
@@ -36,6 +37,7 @@ export component MainWindow inherits Window {
     in property <int> video-height: 0;
     in property <string> preview-timecode: "00:00.000";
     in property <string> active-caption: "";
+    in property <[CaptionWord]> caption-words: [];
     in property <bool> show-caption: false;
 
     // Theme mirror.
@@ -77,6 +79,13 @@ export component MainWindow inherits Window {
     // windowing on the Rust side.
     out property <length> timeline-pixels: timeline-view.lane-pixels;
 
+    // Captions drawer.
+    in property <bool> caption-drawer-open: false;
+    in property <[CaptionRow]> caption-rows: [];
+    callback caption-drawer-toggled();
+    callback caption-row-selected(index: int);
+    callback caption-row-edited(index: int, text: string);
+
     // Header intents.
     callback browse-requested();
     callback open-video(path: string);
@@ -98,6 +107,7 @@ export component MainWindow inherits Window {
     callback segment-drag-begin(index: int, mode: int, pointer-x: length);
     callback segment-drag-move(pointer-x: length);
     callback segment-drag-end();
+    callback add-caption-requested(ms: int);
 
     // Inspector intents.
     callback theme-edited(theme: ThemeData);
@@ -126,6 +136,7 @@ export component MainWindow inherits Window {
             export-requested => { root.export-requested(); }
             export-video-requested => { root.export-video-requested(); }
             transcribe-requested => { root.transcribe-requested(); }
+            captions-requested => { root.caption-drawer-toggled(); }
             settings-changed(model-index, use-gpu, use-vad) => {
                 root.settings-changed(model-index, use-gpu, use-vad);
             }
@@ -148,10 +159,12 @@ export component MainWindow inherits Window {
                     video-width: root.video-width;
                     video-height: root.video-height;
                     caption: root.active-caption;
+                    caption-words: root.caption-words;
                     show-caption: root.show-caption;
                     timecode: root.preview-timecode;
                     font-size: root.theme.font-size;
                     primary-color: root.primary-color;
+                    highlight-color: root.highlight-color;
                     outline-color: root.outline-color;
                     outline-width: root.theme.outline-width * 1px;
                     bold: root.theme.bold;
@@ -181,6 +194,7 @@ export component MainWindow inherits Window {
                     segment-drag-begin(index, mode, pointer-x) => { root.segment-drag-begin(index, mode, pointer-x); }
                     segment-drag-move(pointer-x) => { root.segment-drag-move(pointer-x); }
                     segment-drag-end => { root.segment-drag-end(); }
+                    add-caption(ms) => { root.add-caption-requested(ms); }
                 }
             }
 
@@ -244,5 +258,17 @@ export component MainWindow inherits Window {
                 }
             }
         }
+    }
+
+    // The captions drawer sits on top of the layout and slides in from the
+    // right; it is declared last so it renders above the other panels.
+    captions-drawer := CaptionsDrawer {
+        host-width: root.width;
+        host-height: root.height;
+        open: root.caption-drawer-open;
+        rows: root.caption-rows;
+        close-requested => { root.caption-drawer-toggled(); }
+        row-selected(index) => { root.caption-row-selected(index); }
+        row-edited(index, text) => { root.caption-row-edited(index, text); }
     }
 }

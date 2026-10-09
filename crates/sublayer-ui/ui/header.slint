@@ -23,6 +23,7 @@ export component Header inherits Rectangle {
     callback export-requested();
     callback export-video-requested();
     callback transcribe-requested();
+    callback captions-requested();
     callback settings-changed(model-index: int, use-gpu: bool, use-vad: bool);
 
     height: 102px;
@@ -55,6 +56,14 @@ export component Header inherits Rectangle {
                 letter-spacing: 0.4px;
                 vertical-alignment: center;
             }
+            // Separator so the brand and the stem-derived project name never
+            // read as one compound label ("Sublayer test").
+            Text {
+                text: "\u{00b7}";
+                color: Palette.border;
+                font-size: 13px;
+                vertical-alignment: center;
+            }
             Text {
                 text: root.project-name;
                 color: Palette.text-dim;
@@ -77,6 +86,11 @@ export component Header inherits Rectangle {
                 text: "Save As…";
                 enabled: root.has-project;
                 clicked => { root.save-as-requested(); }
+            }
+            ToolButton {
+                text: "Captions";
+                enabled: root.has-project;
+                clicked => { root.captions-requested(); }
             }
             ToolButton {
                 text: "Export ASS";

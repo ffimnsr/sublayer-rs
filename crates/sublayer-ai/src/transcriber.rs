@@ -240,6 +240,8 @@ fn transcribe_blocking(
         append_words(&state, &mut words, window.offset_ms);
     }
 
+    normalize_word_times(&mut words);
+
     let _ = progress_tx.try_send(1.0);
     Ok(words)
 }
@@ -265,6 +267,37 @@ fn make_params<'a>(config: &TranscriberConfig) -> FullParams<'a> {
 /// their text is usually hallucinated. (`whisper_full_params.no_speech_thold`
 /// itself is not implemented in whisper.cpp, so the filtering happens here.)
 const NO_SPEECH_FILTER_THRESHOLD: f32 = 0.9;
+
+/// Floor for a word's end time when whisper.cpp left it degenerate.
+///
+/// DTW stamps token *starts*; on music-heavy audio the attention-based ends
+/// collapse onto the starts, which would otherwise shatter the caption cards
+/// into invisible zero-duration flashes.
+const MIN_WORD_DURATION_MS: u64 = 60;
+
+/// Extends words whose end collapsed onto (or before) their start, and words
+/// shorter than the visibility floor.
+///
+/// Whisper's DTW stamps token *starts*; on music-heavy audio the attention-
+/// based ends collapse onto the starts, which would otherwise shatter the
+/// caption cards into invisible zero-duration flashes. Such a word is
+/// stretched to the next word's start — merging consecutive degenerate stamps
+/// back into one caption — and everything shorter than
+/// [`MIN_WORD_DURATION_MS`] gets that floor. Real pauses are untouched: words
+/// with a sane end still end before the next word starts.
+fn normalize_word_times(words: &mut [WordToken]) {
+    for index in 0..words.len() {
+        let start = words[index].start_ms;
+        let next = words.get(index + 1).map(|word| word.start_ms);
+        let spoken = words[index].end_ms;
+        let end = if spoken > start && spoken < next.unwrap_or(u64::MAX) {
+            spoken
+        } else {
+            next.unwrap_or(start)
+        };
+        words[index].end_ms = end.max(start.saturating_add(MIN_WORD_DURATION_MS));
+    }
+}
 
 /// Collects the window's tokens into `words`, shifting timestamps by
 /// `offset_ms` (the window's position in the source audio).
@@ -550,6 +583,54 @@ mod tests {
         assert_eq!(words[0].text, "hello");
         assert_eq!(words[1].text, "world");
         assert_eq!(words[1].start_ms, 200);
+    }
+
+    #[test]
+    fn degenerate_word_ends_are_stretched_to_the_next_word() {
+        let mut words = vec![
+            WordToken::new("this", 1_000, 1_000),
+            WordToken::new("is", 1_200, 1_200),
+            WordToken::new("so", 1_500, 1_500),
+            WordToken::new("long", 1_900, 2_400),
+        ];
+        normalize_word_times(&mut words);
+
+        assert_eq!(words[0].end_ms, 1_200, "merges into the next word");
+        assert_eq!(words[1].end_ms, 1_500);
+        assert_eq!(words[2].end_ms, 1_900);
+        assert_eq!(words[3].end_ms, 2_400, "a sane end is untouched");
+    }
+
+    #[test]
+    fn the_last_degenerate_word_gets_a_visibility_floor() {
+        let mut words = vec![WordToken::new("oh", 5_000, 5_000)];
+        normalize_word_times(&mut words);
+        assert_eq!(words[0].end_ms, 5_000 + MIN_WORD_DURATION_MS);
+    }
+
+    #[test]
+    fn words_shorter_than_the_floor_reach_it_without_eating_the_pause() {
+        let mut words = vec![
+            WordToken::new("a", 1_000, 1_010),
+            WordToken::new("pause", 1_400, 1_800),
+        ];
+        normalize_word_times(&mut words);
+        assert_eq!(words[0].end_ms, 1_000 + MIN_WORD_DURATION_MS);
+        assert_eq!(words[0].end_ms, 1_060);
+        // The 340 ms pause to the next word survives the floor.
+        assert_eq!(words[1].start_ms - words[0].end_ms, 340);
+        assert_eq!(words[1].end_ms, 1_800);
+    }
+
+    #[test]
+    fn sane_word_runs_are_untouched() {
+        let mut words = vec![
+            WordToken::new("one", 0, 300),
+            WordToken::new("two", 700, 900),
+        ];
+        normalize_word_times(&mut words);
+        assert_eq!(words[0].end_ms, 300);
+        assert_eq!(words[1].end_ms, 900);
     }
 
     #[test]

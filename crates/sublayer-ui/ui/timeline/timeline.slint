@@ -29,6 +29,7 @@ export component Timeline inherits Rectangle {
     callback segment-drag-begin(index: int, mode: int, pointer-x: length);
     callback segment-drag-move(pointer-x: length);
     callback segment-drag-end();
+    callback add-caption(ms: int);
 
     background: Palette.panel;
     border-radius: Palette.radius-lg;
@@ -124,6 +125,7 @@ export component Timeline inherits Rectangle {
                     drag-begin(index, mode, pointer-x) => { root.segment-drag-begin(index, mode, pointer-x); }
                     drag-move(pointer-x) => { root.segment-drag-move(pointer-x); }
                     drag-end() => { root.segment-drag-end(); }
+                    add-caption(ms) => { root.add-caption(ms); }
                 }
             }
 
