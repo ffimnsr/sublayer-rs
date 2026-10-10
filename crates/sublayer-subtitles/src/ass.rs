@@ -15,8 +15,10 @@
 //!   word. The compiler instead emits one `Dialogue` event per word, each
 //!   anchored with `\an5\pos(x, y)` at the position the word would occupy in
 //!   the composed line (computed from the same font metrics the auto-fit
-//!   uses). Transforms then hit exactly the word the line holds:
-//!   WordPop springs the word to 115 %, Bounce overshoots through 125 %.
+//!   uses). All events span the whole card, so every word of the sentence
+//!   stays on screen while the transforms are keyed at the spoken word's
+//!   offset — at any moment only that word's event animates: WordPop springs
+//!   the word to 115 %, Bounce overshoots through 125 %.
 //!
 //! Layout: cards are auto-fitted (never wrapped, `WrapStyle: 2`), and pop
 //! events reuse the fitted size so both layouts render the same geometry.
@@ -198,10 +200,12 @@ fn dialogue(
 /// Emits one `\an5\pos`-anchored `Dialogue` event per word for the transform-
 /// based animations.
 ///
-/// Word positions come from the same font metrics as the auto-fit: each word
-/// sits where the composed line would place it, horizontally aligned per the
-/// theme and vertically centered on the line box. A per-word event means the
-/// pop transforms in `pop_tags`/`bounce_tags` animate exactly that word.
+/// Every event spans the **whole card**, so all words of the sentence stay on
+/// screen; word positions come from the same font metrics as the auto-fit,
+/// each word sitting where the composed line would place it. The pop
+/// transform windows are keyed at the word's offset into the card, so at any
+/// moment only the spoken word's event animates — the other events render
+/// their words at rest.
 #[allow(clippy::too_many_arguments)]
 fn pop_dialogues(
     out: &mut String,
@@ -213,6 +217,10 @@ fn pop_dialogues(
     frame_width: u32,
     frame_height: u32,
 ) {
+    let Some(card_start) = segment.start_ms() else {
+        return;
+    };
+    let card_end = segment.end_ms().unwrap_or(card_start).max(card_start + 1);
     let words: Vec<&WordToken> = segment
         .words
         .iter()
@@ -257,18 +265,16 @@ fn pop_dialogues(
 
     let mut cursor = line_left;
     for (word, width) in words.into_iter().zip(&widths) {
-        let start = word.start_ms;
-        let end = word.end_ms.max(start + 1);
         let tags = match theme.animation {
-            // The event clock starts at the word, so its transform windows
-            // are relative to `word.start_ms` (they resolve to `0..` here).
-            AnimationType::Bounce => bounce_tags(word, word.start_ms, theme),
-            _ => pop_tags(word, word.start_ms, theme),
+            // Transform windows are keyed at the word's offset into the card
+            // (the event clock starts at the card, covering all its words).
+            AnimationType::Bounce => bounce_tags(word, card_start, theme),
+            _ => pop_tags(word, card_start, theme),
         };
         out.push_str(&format!(
             "Dialogue: 0,{start_time},{end_time},{STYLE_NAME},,0,0,0,,{{\\an5\\pos({x:.1},{y:.1})}}",
-            start_time = ass_time(start),
-            end_time = ass_time(end),
+            start_time = ass_time(card_start),
+            end_time = ass_time(card_end),
             x = cursor + width / 2.0,
             y = center_y,
         ));
@@ -571,13 +577,10 @@ mod tests {
                     .count();
                 assert_eq!(words, 1, "{theme:?}: exactly one word per event: {line}");
             }
-            // The events keep the card's exact word timings.
+            // The card's timed events span the whole card: the sentence
+            // stays visible and each word pops inside its own span.
             assert!(
-                script.contains("Dialogue: 0,0:00:00.00,0:00:00.40,"),
-                "{script}"
-            );
-            assert!(
-                script.contains("Dialogue: 0,0:00:00.50,0:00:00.90,"),
+                script.contains("Dialogue: 0,0:00:00.00,0:00:00.90,"),
                 "{script}"
             );
         }
