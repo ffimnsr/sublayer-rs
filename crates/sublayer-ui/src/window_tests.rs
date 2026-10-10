@@ -6,7 +6,7 @@
 //! tests never need a Wayland or X11 session.
 
 use std::cell::Cell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use i_slint_backend_testing::ElementQuery;
@@ -123,7 +123,7 @@ fn empty_window_shows_the_idle_state() {
     assert!(ui.get_model_names().row_count() > 0);
     assert_eq!(ui.get_preset_names().row_count(), 5);
     assert_eq!(ui.get_alignment_names().row_count(), 9);
-    assert_eq!(ui.get_animation_names().row_count(), 4);
+    assert_eq!(ui.get_animation_names().row_count(), 5);
     assert!(ui.get_timeline_pixels() > 0.0, "layout must resolve");
 }
 
@@ -523,4 +523,567 @@ fn right_click_on_the_timeline_inserts_a_caption_at_that_time() {
     );
     assert_eq!(ui.get_segments().row_count(), 3);
     assert_eq!(ui.get_caption_rows().row_count(), 3);
+}
+
+#[test]
+fn caption_overlay_renders_for_all_animations() {
+    ensure_platform();
+    let app = App::new().expect("the studio must build headlessly");
+    let ui = app.window();
+    ui.window().set_size(PhysicalSize::new(1320, 860));
+    {
+        let mut session = app.session().borrow_mut();
+        session.install_video(project_with_cards(), 0);
+    }
+    app.refresh();
+    ui.set_has_preview(true);
+    ui.set_video_width(1080);
+    ui.set_video_height(1920);
+
+    // Set playhead inside the first card (1000ms..2000ms)
+    app.session().borrow_mut().set_playhead(1500);
+    app.refresh();
+
+    // Verify caption words are populated
+    assert_eq!(ui.get_caption_words().row_count(), 1);
+    assert_eq!(
+        ui.get_caption_words().row_data(0).unwrap().text.as_str(),
+        "hello"
+    );
+    assert!(ui.get_show_caption());
+    assert!(!ui.get_active_caption().is_empty());
+
+    // Test across ALL animations: None (0), WordPop (1), Karaoke (2), Bounce (3), HighlightBox (4)
+    for anim_idx in 0..5 {
+        let mut data = ui.get_theme();
+        data.animation_index = anim_idx;
+        ui.set_theme(data);
+
+        let text_elements = ElementQuery::from_root(ui)
+            .match_predicate(|el| {
+                el.accessible_label()
+                    .is_some_and(|l| l.contains("HELLO") || l.contains("hello"))
+            })
+            .find_all();
+        assert!(
+            !text_elements.is_empty(),
+            "animation {anim_idx} must render caption text elements"
+        );
+        for el in &text_elements {
+            assert!(
+                el.size().width > 0.0,
+                "word text must have positive width in animation {anim_idx}"
+            );
+            assert!(
+                el.size().height > 0.0,
+                "word text must have positive height in animation {anim_idx}"
+            );
+            assert!(
+                el.size().height < 120.0,
+                "word text/pill must not stretch across video in animation {anim_idx}"
+            );
+        }
+    }
+}
+
+#[test]
+fn long_card_auto_fits_font_size_in_ui_preview() {
+    ensure_platform();
+    let app = App::new().expect("the studio must build headlessly");
+    let ui = app.window();
+    ui.window().set_size(PhysicalSize::new(1320, 860));
+
+    let mut project = session_with_word_card().project.unwrap();
+    project.video_metadata.width = 1080;
+    project.video_metadata.height = 1920;
+    let base_scaled_font_size =
+        sublayer_subtitles::scaled_font_size_for(&project.theme, &project.video_metadata);
+    {
+        let mut session = app.session().borrow_mut();
+        session.install_video(project, 0);
+        session.set_playhead(1500);
+    }
+    app.refresh();
+
+    let preview_font_size = ui.get_preview_font_size();
+    assert!(
+        preview_font_size < base_scaled_font_size as i32,
+        "preview font size ({preview_font_size}) must be scaled down from base font size ({base_scaled_font_size}) to prevent overflow"
+    );
+}
+
+#[test]
+fn alignment_changes_affect_theme_and_ui() {
+    ensure_platform();
+    let app = App::new().expect("the studio must build headlessly");
+    let ui = app.window();
+    ui.window().set_size(PhysicalSize::new(1320, 860));
+
+    {
+        let mut session = app.session().borrow_mut();
+        session.install_video(project_with_cards(), 0);
+    }
+    app.refresh();
+
+    assert_eq!(ui.get_theme().alignment_index, 1);
+    assert_eq!(
+        app.session()
+            .borrow()
+            .project
+            .as_ref()
+            .unwrap()
+            .theme
+            .alignment,
+        2
+    );
+
+    let mut theme_data = ui.get_theme();
+    theme_data.alignment_index = 7;
+    ui.invoke_theme_edited(theme_data);
+
+    assert_eq!(ui.get_theme().alignment_index, 7);
+    assert_eq!(
+        app.session()
+            .borrow()
+            .project
+            .as_ref()
+            .unwrap()
+            .theme
+            .alignment,
+        8
+    );
+
+    let mut theme_data = ui.get_theme();
+    theme_data.alignment_index = 3;
+    ui.invoke_theme_edited(theme_data);
+
+    assert_eq!(ui.get_theme().alignment_index, 3);
+    assert_eq!(
+        app.session()
+            .borrow()
+            .project
+            .as_ref()
+            .unwrap()
+            .theme
+            .alignment,
+        4
+    );
+}
+
+/// The preview caption card must follow the inspector's Alignment setting:
+/// picking bottom/middle/top moves the overlay inside the fitted frame
+/// (bottom lowest, top highest), while the centered row keeps its x.
+#[test]
+fn preview_caption_follows_alignment_anchor() {
+    ensure_platform();
+    let app = App::new().expect("the studio must build headlessly");
+    let ui = app.window();
+    ui.window().set_size(PhysicalSize::new(1320, 860));
+
+    {
+        let mut session = app.session().borrow_mut();
+        session.install_video(project_with_cards(), 0);
+    }
+    app.refresh();
+    ui.set_has_preview(true);
+    ui.set_video_width(1080);
+    ui.set_video_height(1920);
+    app.session().borrow_mut().set_playhead(1500);
+    app.refresh();
+
+    // Caption overlay words; the timeline block with the same label sits far
+    // below the viewport, so only elements inside the preview count.
+    let overlay_words = |ui: &MainWindow| -> Vec<(f32, f32)> {
+        ElementQuery::from_root(ui)
+            .match_predicate(|el| {
+                el.accessible_label()
+                    .is_some_and(|l| l == "HELLO" || l == "hello")
+            })
+            .find_all()
+            .into_iter()
+            .filter(|el| el.absolute_position().y < 500.0)
+            .map(|el| {
+                let pos = el.absolute_position();
+                (pos.x, pos.y)
+            })
+            .collect()
+    };
+
+    let mut measured = Vec::new();
+    for (name, index) in [("bottom", 1), ("middle", 4), ("top", 7)] {
+        let mut data = ui.get_theme();
+        data.alignment_index = index;
+        ui.invoke_theme_edited(data);
+
+        let words = overlay_words(ui);
+        assert!(
+            !words.is_empty(),
+            "{name} alignment must keep the caption visible"
+        );
+        let xs: Vec<f32> = words.iter().map(|(x, _)| *x).collect();
+        let ys: Vec<f32> = words.iter().map(|(_, y)| *y).collect();
+        let x_center = (xs.iter().copied().fold(0.0, f32::max)
+            + xs.iter().copied().fold(f32::MAX, f32::min))
+            / 2.0;
+        measured.push((name, x_center, ys[0]));
+    }
+
+    // Centered rows keep the same x; the y anchor moves bottom -> middle -> top.
+    assert!(
+        (measured[0].1 - measured[1].1).abs() < 2.0 && (measured[1].1 - measured[2].1).abs() < 2.0,
+        "center alignment must not shift the row horizontally: {measured:?}"
+    );
+    assert!(
+        measured[0].2 > measured[1].2 + 20.0 && measured[1].2 > measured[2].2 + 20.0,
+        "alignment must move the caption card bottom -> middle -> top: {measured:?}"
+    );
+    assert!(
+        measured[2].2 > 0.0,
+        "top alignment must stay inside the viewport: {measured:?}"
+    );
+}
+
+/// The preview words must sit exactly where the ASS renderer places them:
+/// the overlay scales the measured `\an5\pos` anchors (`place_words`) from
+/// video pixels onto the fitted frame.
+#[test]
+fn preview_words_match_ass_placement() {
+    ensure_platform();
+    let app = App::new().expect("the studio must build headlessly");
+    let ui = app.window();
+    ui.window().set_size(PhysicalSize::new(1320, 860));
+
+    // Portrait project metadata so the measurement, the fitted frame, and the
+    // window all agree on one aspect ratio.
+    let mut project = project_with_cards();
+    project.video_metadata.width = 1080;
+    project.video_metadata.height = 1920;
+    {
+        let mut session = app.session().borrow_mut();
+        session.install_video(project, 0);
+    }
+    app.refresh();
+    ui.set_has_preview(true);
+    ui.set_video_width(1080);
+    ui.set_video_height(1920);
+    app.session().borrow_mut().set_playhead(1500);
+    app.refresh();
+
+    // The fitted preview frame; its size gives the video-pixel -> screen-px
+    // scale for both axes.
+    let image = ElementQuery::from_root(ui)
+        .match_predicate(|el| {
+            el.type_name().is_some_and(|t| t == "Image") && el.size().width > 200.0
+        })
+        .find_first()
+        .expect("preview image");
+    let image_pos = image.absolute_position();
+    let image_size = image.size();
+    let scale_x = image_size.width / 1080.0;
+    let scale_y = image_size.height / 1920.0;
+
+    for (name, index) in [("bottom-left", 0), ("middle-center", 4), ("top-right", 8)] {
+        let mut data = ui.get_theme();
+        data.alignment_index = index;
+        ui.invoke_theme_edited(data);
+
+        let session = app.session().borrow();
+        let project = session.project.as_ref().expect("project");
+        let placements = sublayer_subtitles::place_words(
+            &project.segments[0],
+            &project.theme,
+            &project.video_metadata,
+            &sublayer_subtitles::resolve_fonts_dir(),
+        )
+        .expect("placement");
+        let (px, py) = (placements[0].x, placements[0].y);
+        drop(session);
+
+        let word = ElementQuery::from_root(ui)
+            .match_predicate(|el| {
+                el.accessible_label().is_some_and(|l| l == "HELLO")
+                    && el.absolute_position().y < 500.0
+            })
+            .find_first()
+            .expect("overlay word");
+        let pos = word.absolute_position();
+        let size = word.size();
+        let (center_x, center_y) = (pos.x + size.width / 2.0, pos.y + size.height / 2.0);
+
+        assert!(
+            (center_x - (image_pos.x + px * scale_x)).abs() < 1.5,
+            "{name}: word center x {center_x:.1} must match ASS anchor {:.1}",
+            image_pos.x + px * scale_x
+        );
+        assert!(
+            (center_y - (image_pos.y + py * scale_y)).abs() < 1.5,
+            "{name}: word center y {center_y:.1} must match ASS anchor {:.1}",
+            image_pos.y + py * scale_y
+        );
+    }
+}
+
+/// Pixel-level regression: render the SAME card through ffmpeg/libass (the
+/// export pipeline's burn) and compare the caption's bounding box with the
+/// preview overlay — same face, weight, size, and pill proportions, so at
+/// least 90 % of either box must overlap the other. Covers a short card, a
+/// long (auto-fitted) card, and a HighlightBox pill card.
+#[test]
+fn preview_caption_matches_the_rendered_frame() {
+    ensure_platform();
+    let Ok(ffmpeg) = sublayer_media::ffmpeg::resolve(
+        sublayer_media::ffmpeg::FFMPEG,
+        sublayer_media::ffmpeg::FFMPEG_ENV,
+    ) else {
+        eprintln!("skipping: ffmpeg unavailable");
+        return;
+    };
+
+    let app = App::new().expect("the studio must build headlessly");
+    let ui = app.window();
+    ui.window().set_size(PhysicalSize::new(1320, 860));
+
+    let cards = [
+        ("short", vec!["hello"], 300, 1),
+        (
+            "long",
+            vec!["whos", "hoo", "gold", "number", "one!"],
+            1100,
+            1,
+        ),
+        ("highlight", vec!["hello"], 300, 4),
+    ];
+    for (label, words, playhead, animation_index) in cards {
+        let mut project = project_with_cards();
+        project.video_metadata.width = 1080;
+        project.video_metadata.height = 1920;
+        project.segments = vec![CaptionSegment::new(
+            words
+                .iter()
+                .enumerate()
+                .map(|(index, &text)| {
+                    WordToken::new(text, index as u64 * 400, index as u64 * 400 + 400)
+                })
+                .collect(),
+        )];
+        {
+            let mut session = app.session().borrow_mut();
+            session.install_video(project, 0);
+        }
+        app.refresh();
+        ui.set_has_preview(true);
+        ui.set_video_width(1080);
+        ui.set_video_height(1920);
+        app.session().borrow_mut().set_playhead(playhead);
+        app.refresh();
+        if animation_index != 1 {
+            let mut theme = ui.get_theme();
+            theme.animation_index = animation_index;
+            ui.invoke_theme_edited(theme);
+        }
+
+        let image = ElementQuery::from_root(ui)
+            .match_predicate(|el| {
+                el.type_name().is_some_and(|t| t == "Image") && el.size().width > 200.0
+            })
+            .find_first()
+            .expect("preview image");
+        let image_pos = image.absolute_position();
+        let image_size = image.size();
+        let scale_x = image_size.width / 1080.0;
+        let scale_y = image_size.height / 1920.0;
+
+        // Union of the preview word boxes, converted back to video pixels;
+        // the HighlightBox pill is part of the caption too.
+        let display: Vec<String> = words.iter().map(|w| w.to_uppercase()).collect();
+        let caption_elements = ElementQuery::from_root(ui)
+            .match_predicate(move |el| {
+                let word = el
+                    .accessible_label()
+                    .is_some_and(|l| display.iter().any(|word| word.as_str() == l.as_str()));
+                let pill = el.id().is_some_and(|id| id.ends_with("caption-pill"));
+                (word || pill) && el.absolute_position().y < 500.0
+            })
+            .find_all();
+        assert!(
+            !caption_elements.is_empty(),
+            "{label}: preview caption must render"
+        );
+        let mut preview_rect = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for el in &caption_elements {
+            let pos = el.absolute_position();
+            let size = el.size();
+            let (x1, y1, x2, y2) = (
+                (pos.x - image_pos.x) / scale_x,
+                (pos.y - image_pos.y) / scale_y,
+                (pos.x + size.width - image_pos.x) / scale_x,
+                (pos.y + size.height - image_pos.y) / scale_y,
+            );
+            preview_rect.0 = preview_rect.0.min(x1);
+            preview_rect.1 = preview_rect.1.min(y1);
+            preview_rect.2 = preview_rect.2.max(x2);
+            preview_rect.3 = preview_rect.3.max(y2);
+        }
+
+        // The pill box alone, for the HighlightBox proportions check.
+        let pill_elements = ElementQuery::from_root(ui)
+            .match_predicate(|el| {
+                el.id().is_some_and(|id| id.ends_with("caption-pill"))
+                    && el.absolute_position().y < 500.0
+            })
+            .find_all();
+        let mut pill_rect = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for el in &pill_elements {
+            let pos = el.absolute_position();
+            let size = el.size();
+            let (x1, y1, x2, y2) = (
+                (pos.x - image_pos.x) / scale_x,
+                (pos.y - image_pos.y) / scale_y,
+                (pos.x + size.width - image_pos.x) / scale_x,
+                (pos.y + size.height - image_pos.y) / scale_y,
+            );
+            pill_rect.0 = pill_rect.0.min(x1);
+            pill_rect.1 = pill_rect.1.min(y1);
+            pill_rect.2 = pill_rect.2.max(x2);
+            pill_rect.3 = pill_rect.3.max(y2);
+        }
+
+        // Burn the same card through ffmpeg's libass and measure the caption
+        // bbox (white text on black; the `bbox` filter logs min/max of pixels
+        // above its threshold).
+        let session = app.session().borrow();
+        let project = session.project.as_ref().expect("project");
+        let fonts_dir = sublayer_subtitles::resolve_fonts_dir();
+        let script = sublayer_subtitles::build_ass_script(
+            &project.segments,
+            &project.theme,
+            &project.video_metadata,
+            &fonts_dir,
+        )
+        .unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("sublayer-render-")
+            .tempdir()
+            .unwrap();
+        let ass_path = dir.path().join("subs.ass");
+        std::fs::write(&ass_path, &script).unwrap();
+        drop(session);
+
+        let output = std::process::Command::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "info", "-y"])
+            .args(["-f", "lavfi", "-i", "color=c=black:s=1080x1920:d=1:r=30"])
+            .arg("-vf")
+            .arg(format!(
+                "trim=start_frame=6:end_frame=7,ass={}:fontsdir={},bbox=min_val={}",
+                escape_filter_path(&ass_path),
+                escape_filter_path(&fonts_dir),
+                // White text shines through at 120; the HighlightBox pill is
+                // a mid-luminance color (e.g. #FE2C55 ≈ 111), so lower it.
+                if animation_index == 4 { 80 } else { 120 }
+            ))
+            .args(["-frames:v", "1", "-f", "null", "-"])
+            .output()
+            .expect("ffmpeg render");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{label}: ffmpeg failed: {stderr}");
+        let values: Vec<f32> = ["x1:", "y1:", "x2:", "y2:"]
+            .iter()
+            .map(|needle| {
+                let line = stderr.lines().rev().find(|line| line.contains(needle));
+                let value = line
+                    .and_then(|line| line.split(needle).nth(1))
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .and_then(|value| value.parse::<f32>().ok());
+                value.unwrap_or_else(|| panic!("{label}: no bbox {needle} in: {stderr}"))
+            })
+            .collect();
+        let render_rect = (values[0], values[1], values[2], values[3]);
+
+        // The render bbox is the glyph INK box; the preview element reports
+        // the line box (ascent+descent), which is taller than the ink. Both
+        // are centered on the same measured anchor, so the parity checks are:
+        // 90 %+ horizontal overlap, a matched width, and a shared y center.
+        let (pw, rw) = (
+            preview_rect.2 - preview_rect.0,
+            render_rect.2 - render_rect.0,
+        );
+        let x_overlap =
+            (preview_rect.2.min(render_rect.2) - preview_rect.0.max(render_rect.0)).max(0.0);
+        assert!(
+            x_overlap / pw >= 0.90,
+            "{label} card: preview x [{:.1},{:.1}] vs render x [{:.1},{:.1}] \
+             overlap {:.3} < 0.90",
+            preview_rect.0,
+            preview_rect.2,
+            render_rect.0,
+            render_rect.2,
+            x_overlap / pw
+        );
+        assert!(
+            (pw - rw).abs() / rw <= 0.15,
+            "{label} card: preview width {pw:.1} vs rendered {rw:.1} drift > 15 %"
+        );
+        // The preview text box must be tall enough to hold the glyph ink:
+        // clipping would slice the letters top and bottom (regression guard
+        // for the stretched line box).
+        let (ph, rh) = (
+            preview_rect.3 - preview_rect.1,
+            render_rect.3 - render_rect.1,
+        );
+        assert!(
+            ph >= rh * 0.7,
+            "{label} card: preview text height {ph:.1} < 70 % of rendered ink {rh:.1} (cropped?)"
+        );
+        let (pcx, rcx) = (
+            (preview_rect.0 + preview_rect.2) / 2.0,
+            (render_rect.0 + render_rect.2) / 2.0,
+        );
+        let (pcy, rcy) = (
+            (preview_rect.1 + preview_rect.3) / 2.0,
+            (render_rect.1 + render_rect.3) / 2.0,
+        );
+        assert!(
+            (pcx - rcx).abs() <= 6.0 && (pcy - rcy).abs() <= 6.0,
+            "{label} card: preview center ({pcx:.1},{pcy:.1}) vs render center ({rcx:.1},{rcy:.1})"
+        );
+
+        // HighlightBox: the preview pill must match the rendered pill spans
+        // (the render bbox is dominated by the pill, which is taller than the
+        // text ink). The old 1.4x-line-box pill fails this by ~60 %.
+        if animation_index == 4 {
+            let (phh, rhh) = (pill_rect.3 - pill_rect.1, render_rect.3 - render_rect.1);
+            assert!(
+                !pill_elements.is_empty(),
+                "{label}: preview must show the HighlightBox pill"
+            );
+            assert!(
+                (phh - rhh).abs() / rhh <= 0.15,
+                "{label}: pill height {phh:.1} vs rendered {rhh:.1} drift > 15 %"
+            );
+            assert!(
+                (pill_rect.2 - pill_rect.0 - rw).abs() / rw <= 0.15,
+                "{label}: pill width {:.1} vs rendered {rw:.1} drift > 15 %",
+                pill_rect.2 - pill_rect.0
+            );
+        }
+    }
+}
+
+/// Escapes an ASS path for the ffmpeg `ass` filter option (mirrors the
+/// export runner).
+fn escape_filter_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let mut escaped = String::with_capacity(text.len() + 2);
+    escaped.push('\'');
+    for character in text.chars() {
+        match character {
+            '\\' | '\'' | ':' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            _ => escaped.push(character),
+        }
+    }
+    escaped.push('\'');
+    escaped
 }

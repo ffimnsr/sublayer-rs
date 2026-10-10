@@ -27,6 +27,34 @@ use crate::{MainWindow, ThemeData};
 /// Poll interval of the bridge pump; 60 Hz keeps scrubbing responsive.
 const PUMP_INTERVAL: Duration = Duration::from_millis(16);
 
+/// Registers every bundled font with Slint's shared collection, so the
+/// preview resolves the theme's family to the same face libass burns into
+/// the render (same files, same shaping widths).
+fn register_bundled_fonts() {
+    let Ok(entries) = std::fs::read_dir(sublayer_subtitles::resolve_fonts_dir()) else {
+        return;
+    };
+    let mut collection = slint::fontique_011::shared_collection();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_font = matches!(
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some("ttf") | Some("otf") | Some("ttc")
+        );
+        if !is_font {
+            continue;
+        }
+        let Ok(data) = std::fs::read(&path) else {
+            continue;
+        };
+        let blob = slint::fontique_011::fontique::Blob::new(std::sync::Arc::new(data));
+        collection.register_fonts(blob, None);
+    }
+}
+
 /// Zoom step of the toolbar buttons and Ctrl+Wheel.
 const ZOOM_STEP: f32 = 1.4;
 
@@ -62,6 +90,10 @@ impl App {
     /// Builds the window, starts the worker runtime, and wires everything up.
     pub fn new() -> Result<Self, UiError> {
         let ui = MainWindow::new()?;
+        // The window brings up the text backend; register the bundled fonts
+        // into Slint's shared collection so the preview centers words with
+        // the same (fontique-visible) family libass burns into the render.
+        register_bundled_fonts();
         let (bridge, events) = Bridge::new()?;
         let session = Rc::new(RefCell::new(Session::default()));
 
@@ -139,6 +171,7 @@ impl App {
         let models = &self.models;
         refresh_task(&self.ui, &session);
         refresh_document(&self.ui, &session);
+        refresh_theme(&self.ui, &session);
         refresh_segments(&self.ui, &session, models);
         refresh_playhead(&self.ui, &session, models);
         refresh_timeline(&self.ui, &session, models);

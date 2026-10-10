@@ -322,3 +322,31 @@ async fn missing_input_is_reported_as_a_render_failure() {
         other => panic!("expected a media error, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn renders_a_project_with_highlight_box_animation() {
+    let Some((mut options, fonts_dir)) = render_setup().await else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let video = directory.path().join("clip_pill.mp4");
+    if let Err(error) = generate_clip(&video, 1).await {
+        eprintln!("skipping: could not create the test clip ({error})");
+        return;
+    }
+    let metadata = probe_video(&video).await.unwrap();
+    options.duration_ms = metadata.duration_ms();
+    let mut project = test_project(&video, metadata);
+    project.theme.animation = sublayer_core::AnimationType::HighlightBox;
+    let output = directory.path().join("out_pill.mp4");
+
+    let (progress_tx, mut progress_rx) = mpsc::channel(64);
+    let render = export_project(&project, &output, &fonts_dir, &options, progress_tx);
+    tokio::spawn(async move { while progress_rx.recv().await.is_some() {} });
+
+    render
+        .await
+        .expect("render with highlight box animation must succeed");
+    assert!(output.exists());
+    assert!(std::fs::metadata(&output).unwrap().len() > 0);
+}

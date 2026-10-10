@@ -162,6 +162,77 @@ fn real_dim_scale(face: &ttf_parser::Face<'_>, data: &[u8]) -> f32 {
     if sum == 0 { 1.0 } else { units / sum as f32 }
 }
 
+/// The REAL_DIM em scale of the file backing `font_name`: the ratio between
+/// the script font size and the em size libass renders (and the measurer
+/// applies). Slint shapes at the standard em, so the preview must request
+/// `font_size * em_scale` to draw glyphs as wide as the burned render.
+pub fn em_scale(fonts_dir: &Path, font_name: &str) -> f32 {
+    FontProfile::of(fonts_dir, font_name).em
+}
+
+/// OS/2 weight class of the file backing `font_name`, so the preview asks
+/// Slint for the same face the render's libass selects (family plus weight
+/// matches the registered file exactly). `400` when unknown.
+pub fn font_weight_class(fonts_dir: &Path, font_name: &str) -> u16 {
+    FontProfile::of(fonts_dir, font_name).weight
+}
+
+/// Everything the studio preview needs to render one caption face: the family
+/// the file registers under, its OS/2 weight, and the REAL_DIM em scale.
+///
+/// One font read serves all three, so seeking stays cheap.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FontProfile {
+    /// Primary family name of the picked file (`None` when unavailable).
+    pub family: Option<String>,
+    /// OS/2 weight class of the picked file; `400` when unknown.
+    pub weight: u16,
+    /// REAL_DIM em scale (`unitsPerEm / (winAscent + winDescent)`).
+    pub em: f32,
+}
+
+impl FontProfile {
+    /// Profile of the file `font_name` resolves to; defaults when the font
+    /// cannot be found or parsed.
+    pub fn of(fonts_dir: &Path, font_name: &str) -> Self {
+        let Some(data) = theme_font_data(fonts_dir, font_name) else {
+            return Self {
+                family: None,
+                weight: 400,
+                em: 1.0,
+            };
+        };
+        let Ok(face) = ttf_parser::Face::parse(&data, 0) else {
+            return Self {
+                family: None,
+                weight: 400,
+                em: 1.0,
+            };
+        };
+        let family = face
+            .names()
+            .into_iter()
+            .find(|name| name.name_id == ttf_parser::name_id::FAMILY && name.is_unicode())
+            .and_then(|name| name.to_string());
+        Self {
+            family,
+            weight: face
+                .tables()
+                .os2
+                .map_or(400, |os2| os2.weight().to_number()),
+            em: real_dim_scale(&face, &data).max(0.05),
+        }
+    }
+}
+
+/// The family the bundled font `font_file` selects for `font_name` registers
+/// under, as a font registry (libass, Slint's fontique) would see it.
+///
+/// `None` when the font cannot be found or parsed.
+pub fn font_family_name(fonts_dir: &Path, font_name: &str) -> Option<String> {
+    FontProfile::of(fonts_dir, font_name).family
+}
+
 /// `(usWinAscent, usWinDescent)` from the OS/2 table, when present.
 fn win_vertical_metrics(data: &[u8]) -> Option<(u16, u16)> {
     let num_tables = u16::from_be_bytes(data.get(4..6)?.try_into().ok()?) as usize;
@@ -325,5 +396,28 @@ mod tests {
             measurer.fitted_font_size("", 128, max_card_width(1080)),
             128
         );
+    }
+
+    #[test]
+    fn font_profile_matches_the_measured_face() {
+        let dir = crate::fonts::resolve_fonts_dir();
+        let profile = FontProfile::of(&dir, "Montserrat");
+        // The picked file (Montserrat-Bold.ttf) declares the family and the
+        // weight the face registers under; the em mirrors REAL_DIM.
+        assert_eq!(profile.family.as_deref(), Some("Montserrat"));
+        assert_eq!(profile.weight, 700);
+        let expected = 1000.0 / (1109.0 + 453.0);
+        assert!(
+            (profile.em - expected).abs() < 0.01,
+            "{} != {expected}",
+            profile.em
+        );
+        // The single-read profile agrees with the split helpers.
+        assert_eq!(
+            font_family_name(&dir, "Montserrat").as_deref(),
+            Some("Montserrat")
+        );
+        assert_eq!(font_weight_class(&dir, "Montserrat"), 700);
+        assert!((em_scale(&dir, "Montserrat") - profile.em).abs() < 1e-6);
     }
 }

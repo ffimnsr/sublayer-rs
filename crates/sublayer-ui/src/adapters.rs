@@ -6,17 +6,18 @@
 use slint::{Image, SharedPixelBuffer, SharedString};
 use sublayer_core::{AnimationType, CaptionSegment, Project, Rgba, ThemeStyle};
 use sublayer_media::{RgbaFrame, WaveformCache};
-use sublayer_subtitles::PRESET_NAMES;
+use sublayer_subtitles::{PRESET_NAMES, WordPlacement};
 
 use crate::{BucketItem, CaptionRow, CaptionWord, SegmentItem, ThemeData};
 
 /// Caption animations in `AnimationType` declaration order, matching the
 /// inspector dropdown.
-const ANIMATIONS: [AnimationType; 4] = [
+const ANIMATIONS: [AnimationType; 5] = [
     AnimationType::None,
     AnimationType::WordPop,
     AnimationType::Karaoke,
     AnimationType::Bounce,
+    AnimationType::HighlightBox,
 ];
 
 /// Builds the inspector snapshot for `theme`.
@@ -136,8 +137,15 @@ pub fn caption_row_items(segments: &[CaptionSegment], selected: Option<usize>) -
 }
 
 /// The word under `playhead_ms` of the caption at that time, with every word
-/// of the card; `active` marks the spoken one.
-pub fn caption_words_at(project: &Project, playhead_ms: u64) -> Option<Vec<CaptionWord>> {
+/// of the card; `active` marks the spoken one. `placements` carries the
+/// ASS-measured anchors (`sublayer_subtitles::place_words`) of the active
+/// card's words, in video pixels; words without a placement render at the
+/// origin (they have no measurable geometry).
+pub fn caption_words_at(
+    project: &Project,
+    playhead_ms: u64,
+    placements: Option<&[WordPlacement]>,
+) -> Option<Vec<CaptionWord>> {
     let segment = project.segments.iter().find(|segment| {
         let start = segment.start_ms().unwrap_or(0);
         let end = segment.end_ms().unwrap_or(start).max(start + 1);
@@ -148,11 +156,27 @@ pub fn caption_words_at(project: &Project, playhead_ms: u64) -> Option<Vec<Capti
             .words
             .iter()
             .enumerate()
-            .map(|(index, word)| CaptionWord {
+            // The measurer skips whitespace-only words, so placements are
+            // indexed by measurable word, not by raw word index.
+            .scan(0_usize, |table_index, (index, word)| {
+                let placement = if word.text.trim().is_empty() {
+                    None
+                } else {
+                    let placement = placements.and_then(|ps| ps.get(*table_index));
+                    *table_index += 1;
+                    placement
+                };
+                Some((index, word, placement))
+            })
+            .map(|(index, word, placement)| CaptionWord {
                 index: index as i32,
                 text: word.text.clone().into(),
                 active: word.start_ms <= playhead_ms
                     && playhead_ms < word.end_ms.max(word.start_ms + 1),
+                x: placement.map_or(0.0, |p| p.x),
+                y: placement.map_or(0.0, |p| p.y),
+                width: placement.map_or(0.0, |p| p.width),
+                pill_pad_x: placement.map_or(0.0, |p| p.pill_pad_x),
             })
             .collect(),
     )
@@ -425,5 +449,45 @@ mod tests {
         let image = frame_to_image(&frame);
         assert_eq!(image.size().width, 2);
         assert_eq!(image.size().height, 1);
+    }
+
+    /// `place_words` skips whitespace-only words, so the overlay must map
+    /// placements to the measurable words, not the raw word index.
+    #[test]
+    fn caption_words_skip_whitespace_in_the_placement_table() {
+        use sublayer_subtitles::WordPlacement;
+        let mut project = Project::new("test", "/tmp/in.mp4", metadata());
+        project.segments = vec![CaptionSegment::new(vec![
+            WordToken::new(" ", 0, 100),
+            WordToken::new("hello", 100, 400),
+            WordToken::new("", 400, 500),
+            WordToken::new("world", 500, 900),
+        ])];
+        let placements = vec![
+            WordPlacement {
+                x: 111.0,
+                y: 222.0,
+                width: 30.0,
+                pill_pad_x: 0.0,
+            },
+            WordPlacement {
+                x: 333.0,
+                y: 444.0,
+                width: 40.0,
+                pill_pad_x: 6.0,
+            },
+        ];
+        let words = caption_words_at(&project, 500, Some(&placements)).expect("card");
+        assert_eq!(words.len(), 4);
+        // Whitespace words never consume a table row and render at the origin.
+        assert_eq!((words[0].x, words[0].y), (0.0, 0.0));
+        assert_eq!((words[2].x, words[2].y), (0.0, 0.0));
+        // Measurable words keep their own placements in order.
+        assert_eq!((words[1].x, words[1].y), (111.0, 222.0));
+        assert_eq!((words[3].x, words[3].y), (333.0, 444.0));
+        assert_eq!(words[3].pill_pad_x, 6.0);
+        // The active word is the spoken one, whitespace or not.
+        assert!(words[3].active);
+        assert!(!words[1].active);
     }
 }

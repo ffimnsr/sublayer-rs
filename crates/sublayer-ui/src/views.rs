@@ -87,7 +87,13 @@ pub(crate) fn install_static_options(ui: &MainWindow) {
         "Top center",
         "Top right",
     ]));
-    ui.set_animation_names(strings(&["None", "Word pop", "Karaoke", "Bounce"]));
+    ui.set_animation_names(strings(&[
+        "None",
+        "Word pop",
+        "Karaoke",
+        "Bounce",
+        "Highlight box",
+    ]));
 }
 
 /// Builds a Slint string model from a slice of string literals.
@@ -190,12 +196,63 @@ pub(crate) fn refresh_playhead(ui: &MainWindow, session: &Session, models: &UiMo
         .and_then(|project| adapters::caption_at(project, session.playhead_ms));
     ui.set_show_caption(caption.is_some());
     ui.set_active_caption(caption.unwrap_or_default());
+    let fonts_dir = sublayer_subtitles::resolve_fonts_dir();
+    // Measured anchors of the active card, in video pixels: the same numbers
+    // the ASS compiler turns into `\an5\pos` events, so the preview overlay
+    // and the burned-in render share one geometry.
+    let placements = session.project.as_ref().and_then(|project| {
+        project
+            .segments
+            .iter()
+            .find(|segment| {
+                let start = segment.start_ms().unwrap_or(0);
+                let end = segment.end_ms().unwrap_or(start).max(start + 1);
+                start <= session.playhead_ms && session.playhead_ms < end
+            })
+            .and_then(|segment| {
+                sublayer_subtitles::place_words(
+                    segment,
+                    &project.theme,
+                    &project.video_metadata,
+                    &fonts_dir,
+                )
+            })
+    });
     let words = session
         .project
         .as_ref()
-        .and_then(|project| adapters::caption_words_at(project, session.playhead_ms))
+        .and_then(|project| {
+            adapters::caption_words_at(project, session.playhead_ms, placements.as_deref())
+        })
         .unwrap_or_default();
     sync_rows(&models.caption_words, words);
+
+    if let Some(project) = session.project.as_ref() {
+        let active_segment = project.segments.iter().find(|segment| {
+            let start = segment.start_ms().unwrap_or(0);
+            let end = segment.end_ms().unwrap_or(0);
+            start <= session.playhead_ms && session.playhead_ms < end
+        });
+        let font_size = if let Some(segment) = active_segment {
+            sublayer_subtitles::fitted_font_size(
+                segment,
+                &project.theme,
+                &project.video_metadata,
+                &fonts_dir,
+            )
+        } else {
+            sublayer_subtitles::scaled_font_size_for(&project.theme, &project.video_metadata)
+        };
+        // Slint shapes at the standard em while libass renders REAL_DIM; scale
+        // the preview size by the same em factor so glyphs are as wide as the
+        // burned render. Family and weight come from the same file the render's
+        // libass selects, in one font read.
+        let profile = sublayer_subtitles::FontProfile::of(&fonts_dir, &project.theme.font_name);
+        ui.set_preview_font_size((font_size as f32 * profile.em).round() as i32);
+        ui.set_preview_font_family(profile.family.unwrap_or_default().into());
+        ui.set_preview_font_weight(i32::from(profile.weight));
+        ui.set_preview_em_scale(profile.em);
+    }
 }
 
 /// Pushes zoom, scroll, and the waveform window.

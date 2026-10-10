@@ -68,7 +68,7 @@ export component Inspector inherits Rectangle {
             SectionLabel { text: "PRESET"; }
             ComboBox {
                 model: root.preset-names;
-                current-index: root.theme.preset-index;
+                current-index <=> root.theme.preset-index;
                 selected(value) => {
                     root.theme.preset-index = self.current-index;
                     root.theme-edited(root.theme);
@@ -257,7 +257,7 @@ export component Inspector inherits Rectangle {
                 ComboBox {
                     horizontal-stretch: 1;
                     model: root.alignment-names;
-                    current-index: root.theme.alignment-index;
+                    current-index <=> root.theme.alignment-index;
                     selected(value) => {
                         root.theme.alignment-index = self.current-index;
                         root.theme-edited(root.theme);
@@ -270,7 +270,7 @@ export component Inspector inherits Rectangle {
                 ComboBox {
                     horizontal-stretch: 1;
                     model: root.animation-names;
-                    current-index: root.theme.animation-index;
+                    current-index <=> root.theme.animation-index;
                     selected(value) => {
                         root.theme.animation-index = self.current-index;
                         root.theme-edited(root.theme);

@@ -213,6 +213,25 @@ mod tests {
     }
 
     #[test]
+    fn theme_json_accepts_highlight_box_and_pill() {
+        let json = r##"{"name":"Custom","font_name":"Montserrat","font_size":60,
+            "primary_color":"#FFFFFF","highlight_color":"#FFD400",
+            "outline_color":"#000000","outline_width":4.0,"shadow":0.0,
+            "bold":true,"uppercase":true,"alignment":2,"margin_v":200,
+            "animation":"highlight_box"}"##;
+        let theme = from_json(json).unwrap();
+        assert_eq!(theme.animation, AnimationType::HighlightBox);
+
+        let json_pill = r##"{"name":"Custom","font_name":"Montserrat","font_size":60,
+            "primary_color":"#FFFFFF","highlight_color":"#FFD400",
+            "outline_color":"#000000","outline_width":4.0,"shadow":0.0,
+            "bold":true,"uppercase":true,"alignment":2,"margin_v":200,
+            "animation":"highlight_pill"}"##;
+        let theme_pill = from_json(json_pill).unwrap();
+        assert_eq!(theme_pill.animation, AnimationType::HighlightBox);
+    }
+
+    #[test]
     fn unknown_animation_is_rejected() {
         let json = r##"{"name":"X","font_name":"M","font_size":10,
             "primary_color":"#FFFFFF","highlight_color":"#FF0000",

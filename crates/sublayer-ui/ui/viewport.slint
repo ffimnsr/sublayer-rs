@@ -3,16 +3,86 @@
 // Frames arrive as `slint::Image` buffers produced from decoded RGBA previews;
 // the caption is drawn as native text so no video or overlay library is needed
 // on either Wayland or X11.
+//
+// The caption does NOT lay itself out: every word carries its measured
+// position (`x`/`y` word/line centers, `width` advance, pill padding — see
+// `sublayer_subtitles::place_words`), the same numbers the ASS compiler turns
+// into `\an5\pos` events. Scaling those by `fit-scale` puts the preview text
+// exactly where the burned-in render places it.
 
 import { Palette } from "theme.slint";
 
 // One word of the caption overlay; `active` marks the word under the
 // playhead, which pops into the highlight color while the rest stays in the
-// primary color.
+// primary color. `x`/`y`/`pill-pad-x` are video pixels measured with the
+// theme font, matching the ASS `\an5\pos` of the rendered output.
 export struct CaptionWord {
     index: int,
     text: string,
     active: bool,
+    x: float,
+    y: float,
+    width: float,
+    pill-pad-x: float,
+}
+
+component CaptionWordItem inherits Rectangle {
+    in property <string> text;
+    in property <string> font-family;
+    in property <color> text-color;
+    in property <color> stroke-color;
+    in property <length> stroke-width;
+    in property <length> font-size;
+    in property <int> font-weight;
+    in property <bool> is-pill;
+    in property <color> pill-color;
+    in property <float> fit-scale;
+    // REAL_DIM em factor the font size is scaled by (see `em_scale`); the
+    // pill proportions are defined against the unscaled fitted size.
+    in property <float> em-scale: 1.0;
+    // Measured word advance and HighlightBox pill padding, video pixels.
+    in property <float> width-video;
+    in property <length> pad-x;
+
+    // Pill behind the text: ASS pill height (0.88 × fitted) and radius
+    // (0.22 × pill height, 3..10 px), centered on the same line center, so
+    // the text overflows it exactly like the rendered card.
+    property <length> pill-h: root.font-size * 0.88 / root.em-scale;
+    property <length> pill-radius: min(max(root.pill-h * 0.22, 3px * root.fit-scale), 10px * root.fit-scale);
+
+    vertical-stretch: 0;
+    // Line box in screen pixels (`font-size` arrives already fit-scaled):
+    // the anchor sits at the item center and Slint clips glyphs to the text
+    // element, so the box must be tall enough for the ink.
+    height: root.font-size * 1.4;
+    width: root.width-video * root.fit-scale * 1px + 2 * root.pad-x;
+
+    caption-pill := Rectangle {
+        visible: root.is-pill;
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        width: parent.width;
+        height: root.pill-h;
+        background: root.pill-color;
+        border-radius: root.pill-radius;
+        animate background { duration: 80ms; }
+    }
+
+    Text {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        text: root.text;
+        font-family: root.font-family;
+        color: root.text-color;
+        stroke: root.stroke-color;
+        stroke-width: root.stroke-width;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
 }
 
 export component Viewport inherits Rectangle {
@@ -31,9 +101,17 @@ export component Viewport inherits Rectangle {
     in property <color> highlight-color: #fe2c55;
     in property <color> outline-color: black;
     in property <length> outline-width: 4px;
-    in property <bool> bold: true;
     in property <bool> uppercase: true;
-    in property <int> margin-v: 320;
+    in property <int> animation-index: 1;
+    // Family the caption renders with; empty selects Slint's default.
+    in property <string> font-family: "";
+    // Weight of the face the render's libass selected; constant because the
+    // burn keeps one face per card (the active word pops by scale, not weight).
+    in property <int> font-weight: 700;
+    // REAL_DIM em factor applied to the font size (see `em_scale`).
+    in property <float> em-scale: 1.0;
+
+    property <bool> highlight-is-bright: (root.highlight-color.red * 0.299 + root.highlight-color.green * 0.587 + root.highlight-color.blue * 0.114) >= 0.5;
 
     background: #05060a;
     border-radius: Palette.radius-lg;
@@ -55,26 +133,32 @@ export component Viewport inherits Rectangle {
         image-fit: contain;
     }
 
-    // Caption overlay, aligned inside the fitted frame (bottom-center, like
-    // the ASS renderer's margin-V). Words are laid out next to each other and
-    // the word under the playhead pops into the highlight color.
-    if (root.has-frame && root.show-caption && root.caption != "") : HorizontalLayout {
-        x: preview.x + root.frame-width * 0.04;
-        width: root.frame-width * 0.92;
-        y: preview.y + root.frame-height - self.height - (root.margin-v * root.fit-scale * 1px);
-        alignment: center;
-        spacing: 5px;
-
-        for word in root.caption-words : Text {
+    // Caption overlay: each word sits at the ASS-rendered anchor (`\an5\pos`
+    // word center / line center), scaled from video pixels to the fitted
+    // frame. The item is centered on `word.x`/`word.y`, so its size does not
+    // shift the anchor.
+    if (root.has-frame && root.show-caption && root.caption != "") : Rectangle {
+        for word in root.caption-words : CaptionWordItem {
+            // Center the word (its natural text width) on the measured
+            // anchor, so glyphs hug the ASS position even when the preview
+            // face shapes wider than the render's measurement.
+            x: preview.x + (word.x - self.width / (root.fit-scale * 1px) / 2.0) * root.fit-scale * 1px;
+            y: preview.y + (word.y - self.height / (root.fit-scale * 1px) / 2.0) * root.fit-scale * 1px;
+            width-video: word.width;
+            pad-x: word.pill-pad-x * root.fit-scale * 1px;
+            em-scale: root.em-scale;
             text: root.uppercase ? word.text.to-uppercase() : word.text;
-            color: word.active ? root.highlight-color : root.primary-color;
-            animate color { duration: 90ms; }
-            // A zero-width stroke still draws a hairline; hide the stroke there.
-            stroke: root.outline-width > 0px ? root.outline-color : transparent;
+            font-family: root.font-family;
+            is-pill: root.animation-index == 4 && word.active;
+            pill-color: root.highlight-color;
+            text-color: self.is-pill
+                ? (root.highlight-is-bright ? root.outline-color : root.primary-color)
+                : (word.active ? root.highlight-color : root.primary-color);
+            stroke-color: (self.is-pill || root.outline-width <= 0px) ? transparent : root.outline-color;
             stroke-width: root.outline-width * root.fit-scale;
             font-size: root.font-size * root.fit-scale * 1px;
-            font-weight: root.bold ? (word.active ? 900 : 700) : 400;
-            horizontal-alignment: center;
+            font-weight: root.font-weight;
+            fit-scale: root.fit-scale;
         }
     }
 

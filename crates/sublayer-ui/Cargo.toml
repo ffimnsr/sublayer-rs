@@ -19,7 +19,9 @@ sublayer-media.workspace = true
 sublayer-ai.workspace = true
 sublayer-subtitles.workspace = true
 sublayer-export.workspace = true
-slint.workspace = true
+# Slint's runtime font registration (fontique) mirrors the bundled fonts the
+# render burns, so the preview measures and centers words with the same face.
+slint = { workspace = true, features = ["unstable-fontique-011"] }
 crossbeam-channel.workspace = true
 rfd.workspace = true
 tempfile.workspace = true

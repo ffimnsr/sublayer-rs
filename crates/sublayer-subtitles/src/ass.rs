@@ -97,6 +97,170 @@ fn scaled_font_size(theme: &ThemeStyle, scale: f32) -> u32 {
     (theme.font_size as f32 * scale).round().max(1.0) as u32
 }
 
+/// Calculates the fitted font size for `segment` at the video's resolution,
+/// matching the auto-fitting logic applied when compiling the ASS script.
+pub fn fitted_font_size(
+    segment: &CaptionSegment,
+    theme: &ThemeStyle,
+    video_meta: &VideoMetadata,
+    fonts_dir: &Path,
+) -> u32 {
+    let (width, height) = if video_meta.width > 0 && video_meta.height > 0 {
+        (video_meta.width, video_meta.height)
+    } else {
+        FALLBACK_RESOLUTION
+    };
+    let scale = height as f32 / REFERENCE_HEIGHT;
+    let font_size = scaled_font_size(theme, scale);
+    let font_data = metrics::theme_font_data(fonts_dir, &theme.font_name);
+    let measurer = Measurer::new(font_data.as_deref());
+    measurer.fitted_font_size(
+        &card_text(segment, theme),
+        font_size,
+        metrics::max_card_width(width),
+    )
+}
+
+/// Base font size scaled to the video resolution, before auto-fitting.
+pub fn scaled_font_size_for(theme: &ThemeStyle, video_meta: &VideoMetadata) -> u32 {
+    let height = if video_meta.height > 0 {
+        video_meta.height
+    } else {
+        FALLBACK_RESOLUTION.1
+    };
+    let scale = height as f32 / REFERENCE_HEIGHT;
+    scaled_font_size(theme, scale)
+}
+
+/// One measured word of a caption card, in script (video) pixels.
+///
+/// `x`/`y` are the `\an5` anchors the per-word dialogue events use: `x` is
+/// the word's horizontal center on the composed line, `y` the line's vertical
+/// center (margin-aware). `width` is the word's advance width and
+/// `pill_pad_x` the HighlightBox pill padding (`0.0` for other animations).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WordPlacement {
+    /// Word center x, in script pixels.
+    pub x: f32,
+    /// Line center y, in script pixels.
+    pub y: f32,
+    /// Word advance width, in script pixels.
+    pub width: f32,
+    /// HighlightBox pill horizontal padding, in script pixels.
+    pub pill_pad_x: f32,
+}
+
+/// Measures every word of `segment` with the metrics the ASS compiler uses
+/// for its per-word events (`\an5\pos`), honoring `theme`'s alignment,
+/// margin, and animation. `None` when the segment has no measurable words.
+///
+/// The studio preview feeds these values into its overlay so the caption on
+/// screen sits exactly where the burned-in render places it.
+pub fn place_words(
+    segment: &CaptionSegment,
+    theme: &ThemeStyle,
+    video_meta: &VideoMetadata,
+    fonts_dir: &Path,
+) -> Option<Vec<WordPlacement>> {
+    let (width, height) = if video_meta.width > 0 && video_meta.height > 0 {
+        (video_meta.width, video_meta.height)
+    } else {
+        FALLBACK_RESOLUTION
+    };
+    let scale = height as f32 / REFERENCE_HEIGHT;
+    let font_size = scaled_font_size(theme, scale);
+    let font_data = metrics::theme_font_data(fonts_dir, &theme.font_name);
+    let measurer = Measurer::new(font_data.as_deref());
+    place_words_with(segment, theme, &measurer, font_size, width, height)
+        .map(|(_, placements)| placements)
+}
+
+/// Shared measurement core of [`place_words`] and the pop event compiler.
+///
+/// Returns the fitted font size alongside the placements; the compiler needs
+/// it for its `\fs` override and pill sizing.
+fn place_words_with(
+    segment: &CaptionSegment,
+    theme: &ThemeStyle,
+    measurer: &Measurer<'_>,
+    font_size: u32,
+    frame_width: u32,
+    frame_height: u32,
+) -> Option<(u32, Vec<WordPlacement>)> {
+    let words: Vec<&WordToken> = segment
+        .words
+        .iter()
+        .filter(|word| !word.text.trim().is_empty())
+        .collect();
+    if words.is_empty() {
+        return None;
+    }
+    let fitted_size = measurer.fitted_font_size(
+        &card_text(segment, theme),
+        font_size,
+        metrics::max_card_width(frame_width),
+    );
+    let size = fitted_size as f32;
+    let display: Vec<String> = words
+        .iter()
+        .map(|word| {
+            if theme.uppercase {
+                word.text.to_uppercase()
+            } else {
+                word.text.clone()
+            }
+        })
+        .collect();
+    let widths: Vec<f32> = display
+        .iter()
+        .map(|text| measurer.text_width_px(text, size))
+        .collect();
+    let base_space = measurer.text_width_px(" ", size);
+    let space = if theme.animation == AnimationType::HighlightBox {
+        (base_space * 1.30).round()
+    } else {
+        base_space
+    };
+    let total: f32 = widths.iter().sum::<f32>() + space * (words.len() - 1) as f32;
+    let frame_width = frame_width as f32;
+    let frame_height = frame_height as f32;
+
+    let line_left = match theme.alignment.clamp(1, 9) {
+        1 | 4 | 7 => STYLE_MARGIN_H,
+        3 | 6 | 9 => frame_width - STYLE_MARGIN_H - total,
+        _ => (frame_width - total) / 2.0,
+    };
+    let (ascent, descent) = measurer.line_vertical_extent(size);
+    let line_height = ascent + descent;
+    let margin_v = (theme.margin_v as f32 * (frame_height / REFERENCE_HEIGHT)).round();
+    let center_y = match theme.alignment.clamp(1, 9) {
+        7..=9 => margin_v + line_height / 2.0,
+        4..=6 => frame_height / 2.0,
+        _ => frame_height - margin_v - line_height / 2.0,
+    };
+    let pad_x = if theme.animation == AnimationType::HighlightBox {
+        (size * 0.05).clamp(3.0, 7.0)
+    } else {
+        0.0
+    };
+
+    let mut cursor = line_left;
+    let placements: Vec<WordPlacement> = widths
+        .into_iter()
+        .map(|width| {
+            let placement = WordPlacement {
+                x: cursor + width / 2.0,
+                y: center_y,
+                width,
+                pill_pad_x: pad_x,
+            };
+            cursor += width + space;
+            placement
+        })
+        .collect();
+    Some((fitted_size, placements))
+}
+
 /// `[Script Info]` block.
 fn script_info(out: &mut String, width: u32, height: u32) {
     out.push_str(
@@ -175,14 +339,13 @@ fn dialogue(
     );
     if matches!(
         theme.animation,
-        AnimationType::WordPop | AnimationType::Bounce
+        AnimationType::WordPop | AnimationType::Bounce | AnimationType::HighlightBox
     ) {
         pop_dialogues(
             out,
             segment,
             theme,
             measurer,
-            fitted,
             font_size,
             frame_width,
             frame_height,
@@ -212,7 +375,6 @@ fn pop_dialogues(
     segment: &CaptionSegment,
     theme: &ThemeStyle,
     measurer: &Measurer<'_>,
-    fitted_size: u32,
     font_size: u32,
     frame_width: u32,
     frame_height: u32,
@@ -226,57 +388,60 @@ fn pop_dialogues(
         .iter()
         .filter(|word| !word.text.trim().is_empty())
         .collect();
-    if words.is_empty() {
+    let Some((fitted_size, placements)) = place_words_with(
+        segment,
+        theme,
+        measurer,
+        font_size,
+        frame_width,
+        frame_height,
+    ) else {
         return;
+    };
+    let scale = frame_height as f32 / REFERENCE_HEIGHT;
+
+    // HighlightBox draws an underlying rounded pill behind the active word
+    // on Layer 0 during that word's speech window.
+    if theme.animation == AnimationType::HighlightBox {
+        let pill_h = (fitted_size as f32 * 0.88).round().max(16.0);
+        let radius = (pill_h * 0.22).clamp(3.0, 10.0);
+        for (word, placement) in words.iter().zip(&placements) {
+            let pill_w = (placement.width + placement.pill_pad_x * 2.0).round();
+            let draw = pill_drawing(pill_w, pill_h, radius);
+            let pill_start = word.start_ms.max(card_start);
+            let pill_end = word.end_ms.min(card_end).max(pill_start + 1);
+
+            out.push_str(&format!(
+                "Dialogue: 0,{start_time},{end_time},{STYLE_NAME},,0,0,0,,{{\\an5\\pos({x:.1},{y:.1})\\p1\\1c{highlight}&\\3c{highlight}&\\bord0\\shad0\\t(0,50,\\fscx102\\fscy104)\\t(50,140,\\fscx100\\fscy100)}}{draw}{{\\p0}}\n",
+                start_time = ass_time(pill_start),
+                end_time = ass_time(pill_end),
+                x = placement.x,
+                y = placement.y,
+                highlight = ass_color(theme.highlight_color),
+                draw = draw,
+            ));
+        }
     }
-    let size = fitted_size as f32;
-    let display: Vec<String> = words
-        .iter()
-        .map(|word| {
-            if theme.uppercase {
-                word.text.to_uppercase()
-            } else {
-                word.text.clone()
-            }
-        })
-        .collect();
-    let widths: Vec<f32> = display
-        .iter()
-        .map(|text| measurer.text_width_px(text, size))
-        .collect();
-    let space = measurer.text_width_px(" ", size);
-    let total: f32 = widths.iter().sum::<f32>() + space * (words.len() - 1) as f32;
-    let frame_width = frame_width as f32;
-    let frame_height = frame_height as f32;
 
-    let line_left = match theme.alignment.clamp(1, 9) {
-        1 | 4 | 7 => STYLE_MARGIN_H,
-        3 | 6 | 9 => frame_width - STYLE_MARGIN_H - total,
-        _ => (frame_width - total) / 2.0,
+    let layer = if theme.animation == AnimationType::HighlightBox {
+        1
+    } else {
+        0
     };
-    let (ascent, descent) = measurer.line_vertical_extent(size);
-    let line_height = ascent + descent;
-    let margin_v = (theme.margin_v as f32 * (frame_height / REFERENCE_HEIGHT)).round();
-    let center_y = match theme.alignment.clamp(1, 9) {
-        7..=9 => margin_v + line_height / 2.0,
-        4..=6 => frame_height / 2.0,
-        _ => frame_height - margin_v - line_height / 2.0,
-    };
-
-    let mut cursor = line_left;
-    for (word, width) in words.into_iter().zip(&widths) {
+    for (word, placement) in words.into_iter().zip(&placements) {
         let tags = match theme.animation {
             // Transform windows are keyed at the word's offset into the card
             // (the event clock starts at the card, covering all its words).
             AnimationType::Bounce => bounce_tags(word, card_start, theme),
+            AnimationType::HighlightBox => highlight_box_tags(word, card_start, theme, scale),
             _ => pop_tags(word, card_start, theme),
         };
         out.push_str(&format!(
-            "Dialogue: 0,{start_time},{end_time},{STYLE_NAME},,0,0,0,,{{\\an5\\pos({x:.1},{y:.1})}}",
+            "Dialogue: {layer},{start_time},{end_time},{STYLE_NAME},,0,0,0,,{{\\an5\\pos({x:.1},{y:.1})}}",
             start_time = ass_time(card_start),
             end_time = ass_time(card_end),
-            x = cursor + width / 2.0,
-            y = center_y,
+            x = placement.x,
+            y = placement.y,
         ));
         if fitted_size < font_size {
             out.push_str(&format!("{{\\fs{fitted_size}}}"));
@@ -284,7 +449,6 @@ fn pop_dialogues(
         out.push_str(&tags);
         out.push_str(&word_text(word, theme));
         out.push('\n');
-        cursor += width + space;
     }
 }
 
@@ -324,9 +488,9 @@ fn dialogue_text(
                 out.push_str(&format!("{{\\k{}}}", karaoke_cs(word)));
                 out.push_str(&word_text(word, theme));
             }
-            // Pop families are emitted as per-word events in `pop_dialogues`.
-            AnimationType::WordPop | AnimationType::Bounce => {
-                unreachable!("pop cards render as per-word dialogue events")
+            // Pop and pill families are emitted as per-word events in `pop_dialogues`.
+            AnimationType::WordPop | AnimationType::Bounce | AnimationType::HighlightBox => {
+                unreachable!("pop and pill cards render as per-word dialogue events")
             }
         }
         out.push(' ');
@@ -385,6 +549,73 @@ fn bounce_tags(word: &WordToken, line_start_ms: u64, theme: &ThemeStyle) -> Stri
         "{{\\1c{base}\\t({start},{peak},\\fscx145\\fscy145\\1c{highlight}&)\\t({peak},{trough},\\fscx95\\fscy95)\\t({trough},{overshoot},\\fscx112\\fscy112)\\t({overshoot},{settle},\\fscx100\\fscy100\\1c{base}&)}}",
         highlight = ass_color(theme.highlight_color),
         base = ass_color(theme.primary_color),
+    )
+}
+
+/// Highlight box override for a per-word event:
+/// When the word is spoken, its text contrasts with the highlight pill (e.g.
+/// dark text over bright yellow/green/cyan, or light text over dark colors),
+/// hides the stroke outline so text is crisp on the pill, pops with the pill
+/// to 108 %, settles back to 100 %, and returns to base primary styling when the
+/// word finishes.
+fn highlight_box_tags(
+    word: &WordToken,
+    line_start_ms: u64,
+    theme: &ThemeStyle,
+    scale: f32,
+) -> String {
+    let start = word.start_ms.saturating_sub(line_start_ms);
+    let grow = start + 50;
+    let settle = start + 140;
+    let end = word.end_ms.saturating_sub(line_start_ms).max(settle);
+    let revert = end + 20;
+
+    let base = ass_color(theme.primary_color);
+    let outline = ass_color(theme.outline_color);
+    let pill_text = ass_color(pill_text_color(theme));
+    let scaled_outline = theme.outline_width * scale;
+    let scaled_shadow = theme.shadow * scale;
+
+    format!(
+        "{{\\1c{base}&\\3c{outline}&\\bord{scaled_outline:.1}\\shad{scaled_shadow:.1}\\\t({start},{grow},\\1c{pill_text}&\\3c{pill_text}&\\bord0\\shad0\\fscx102\\fscy104)\\\t({grow},{settle},\\fscx100\\fscy100)\\\t({end},{revert},\\1c{base}&\\3c{outline}&\\bord{scaled_outline:.1}\\shad{scaled_shadow:.1})}}"
+    )
+}
+
+/// Picks a contrasting text color for text drawn over the highlight pill.
+fn pill_text_color(theme: &ThemeStyle) -> Rgba {
+    let lum = (u32::from(theme.highlight_color.r) * 299
+        + u32::from(theme.highlight_color.g) * 587
+        + u32::from(theme.highlight_color.b) * 114)
+        / 1000;
+    if lum >= 128 {
+        let outline_lum = (u32::from(theme.outline_color.r) * 299
+            + u32::from(theme.outline_color.g) * 587
+            + u32::from(theme.outline_color.b) * 114)
+            / 1000;
+        if outline_lum < 100 {
+            theme.outline_color
+        } else {
+            Rgba::BLACK
+        }
+    } else {
+        Rgba::WHITE
+    }
+}
+
+/// Generates an ASS vector drawing (`\p1`) path for a rounded rectangle pill.
+fn pill_drawing(width: f32, height: f32, radius: f32) -> String {
+    let c = 0.552_284_8 * radius;
+    format!(
+        "m {r:.1} 0 l {w_r:.1} 0 b {cp1_x:.1} 0 {w:.1} {cp1_y:.1} {w:.1} {r:.1}         l {w:.1} {h_r:.1} b {w:.1} {cp2_y:.1} {cp1_x:.1} {h:.1} {w_r:.1} {h:.1}         l {r:.1} {h:.1} b {cp3_x:.1} {h:.1} 0 {cp2_y:.1} 0 {h_r:.1}         l 0 {r:.1} b 0 {cp1_y:.1} {cp3_x:.1} 0 {r:.1} 0",
+        r = radius,
+        w = width,
+        h = height,
+        w_r = width - radius,
+        h_r = height - radius,
+        cp1_x = width - radius + c,
+        cp1_y = radius - c,
+        cp2_y = height - radius + c,
+        cp3_x = radius - c,
     )
 }
 
@@ -696,6 +927,60 @@ mod tests {
     }
 
     #[test]
+    fn highlight_box_emits_layer_0_pill_and_layer_1_text() {
+        let theme = ThemeStyle {
+            animation: AnimationType::HighlightBox,
+            ..themes::hormozi_bold()
+        };
+        let script = build_ass_script(
+            &[segment(&["Hormozi", "style"])],
+            &theme,
+            &metadata(1080, 1920),
+            Path::new(""),
+        )
+        .unwrap();
+
+        // Layer 0: pill vector drawing for each word
+        let pills: Vec<&str> = script
+            .lines()
+            .filter(|line| line.starts_with("Dialogue: 0,") && line.contains(r"\p1"))
+            .collect();
+        assert_eq!(pills.len(), 2, "one pill drawing per word on Layer 0");
+        for pill in pills {
+            assert!(pill.contains(r"\bord0\shad0"));
+            assert!(pill.contains(r"\fscx102\fscy104"));
+            assert!(pill.contains("m "));
+            assert!(pill.contains("b "));
+            assert!(pill.contains(r"{\p0}"));
+        }
+
+        // Layer 1: positioned text for each word
+        let text_events: Vec<&str> = script
+            .lines()
+            .filter(|line| line.starts_with("Dialogue: 1,"))
+            .collect();
+        assert_eq!(text_events.len(), 2, "one text event per word on Layer 1");
+        for line in text_events {
+            assert!(line.contains(r"\an5\pos("));
+            assert!(line.contains(r"\fscx102\fscy104"));
+            // Hormozi yellow is bright, so text inside the pill contrasts with dark/black
+            assert!(line.contains(&ass_color(Rgba::BLACK)));
+        }
+    }
+
+    #[test]
+    fn pill_text_color_adapts_to_luminance() {
+        // Bright highlight: yellow -> black text
+        let bright = themes::hormozi_bold();
+        assert_eq!(pill_text_color(&bright), Rgba::BLACK);
+
+        // Dark highlight: dark navy (#001133) -> white text
+        let mut dark = themes::hormozi_bold();
+        dark.highlight_color = Rgba::opaque(0x00, 0x11, 0x33);
+        assert_eq!(pill_text_color(&dark), Rgba::WHITE);
+    }
+
+    #[test]
     fn zero_duration_words_still_get_visible_karaoke() {
         let words = vec![WordToken::new("hi", 500, 500)];
         let segments = vec![CaptionSegment::new(words)];
@@ -707,5 +992,135 @@ mod tests {
         )
         .unwrap();
         assert!(script.contains("{\\k1}hi"));
+    }
+
+    #[test]
+    fn alignment_affects_dialogue_positions_in_rendered_ass() {
+        for (alignment, expected_y_cmp, expected_x_cmp) in [
+            (7, "top", "left"),
+            (8, "top", "center"),
+            (9, "top", "right"),
+            (4, "middle", "left"),
+            (5, "middle", "center"),
+            (6, "middle", "right"),
+            (1, "bottom", "left"),
+            (2, "bottom", "center"),
+            (3, "bottom", "right"),
+        ] {
+            let mut theme = themes::hormozi_bold();
+            theme.alignment = alignment;
+            let script = build_ass_script(
+                &[segment(&["Hello"])],
+                &theme,
+                &metadata(1080, 1920),
+                Path::new(""),
+            )
+            .unwrap();
+            let pos_line = script.lines().find(|l| l.contains(r"\pos(")).unwrap();
+            let start = pos_line.find(r"\pos(").unwrap() + 5;
+            let end = pos_line[start..].find(")").unwrap() + start;
+            let parts: Vec<f32> = pos_line[start..end]
+                .split(",")
+                .map(|s| s.parse().unwrap())
+                .collect();
+            let (x, y) = (parts[0], parts[1]);
+
+            match expected_y_cmp {
+                "top" => assert!(
+                    y < 700.0,
+                    "top alignment {alignment} must place y near top: {y}"
+                ),
+                "middle" => assert!(
+                    (y - 960.0).abs() < 50.0,
+                    "middle alignment {alignment} must place y near 960: {y}"
+                ),
+                "bottom" => assert!(
+                    y > 1200.0,
+                    "bottom alignment {alignment} must place y near bottom: {y}"
+                ),
+                _ => unreachable!(),
+            }
+            match expected_x_cmp {
+                "left" => assert!(
+                    x < 400.0,
+                    "left alignment {alignment} must place first word near left: {x}"
+                ),
+                "center" => assert!(
+                    (x - 450.0).abs() < 100.0,
+                    "center alignment {alignment} must place first word near center: {x}"
+                ),
+                "right" => assert!(
+                    x > 500.0,
+                    "right alignment {alignment} must place first word toward right: {x}"
+                ),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn alignment_affects_style_block_for_karaoke_and_none() {
+        let mut theme = themes::clean_podcast();
+        theme.alignment = 7;
+        let script = build_ass_script(&[], &theme, &metadata(1080, 1920), Path::new("")).unwrap();
+        assert!(script.contains(",7,40,40,"));
+    }
+
+    /// `place_words` must hand the studio preview exactly the `\an5\pos`
+    /// anchors the compiler emits for the same card, so the on-screen caption
+    /// and the burned-in render share one geometry.
+    #[test]
+    fn place_words_match_emitted_dialogue_positions() {
+        let fonts_dir = crate::fonts::resolve_fonts_dir();
+        let segment = segment(&["Hello", "World"]);
+        for alignment in 1..=9u8 {
+            for animation in [
+                AnimationType::WordPop,
+                AnimationType::Bounce,
+                AnimationType::HighlightBox,
+            ] {
+                let mut theme = themes::hormozi_bold();
+                theme.alignment = alignment;
+                theme.animation = animation;
+                let meta = metadata(1080, 1920);
+                let placements = place_words(&segment, &theme, &meta, &fonts_dir).expect("words");
+                let script =
+                    build_ass_script(std::slice::from_ref(&segment), &theme, &meta, &fonts_dir)
+                        .unwrap();
+
+                let positions: Vec<(f32, f32)> = script
+                    .lines()
+                    .filter(|line| line.contains(r"\pos("))
+                    .map(|line| {
+                        let start = line.find(r"\pos(").unwrap() + 5;
+                        let end = line[start..].find(")").unwrap() + start;
+                        let parts: Vec<f32> = line[start..end]
+                            .split(',')
+                            .map(|value| value.parse().unwrap())
+                            .collect();
+                        (parts[0], parts[1])
+                    })
+                    .collect();
+
+                // HighlightBox also emits one pill event per word with the
+                // same anchors, ahead of the text events.
+                let expected = match animation {
+                    AnimationType::HighlightBox => placements
+                        .iter()
+                        .chain(placements.iter())
+                        .map(|p| (p.x, p.y))
+                        .collect::<Vec<_>>(),
+                    _ => placements.iter().map(|p| (p.x, p.y)).collect(),
+                };
+                assert_eq!(positions.len(), expected.len(), "alignment {alignment}");
+                for (index, ((x, y), (ex, ey))) in positions.into_iter().zip(expected).enumerate() {
+                    assert!(
+                        (x - ex).abs() < 0.1 && (y - ey).abs() < 0.1,
+                        "alignment {alignment} {animation:?} word {index}: \
+                         \\pos({x:.1},{y:.1}) vs placement ({ex:.1},{ey:.1})"
+                    );
+                }
+            }
+        }
     }
 }

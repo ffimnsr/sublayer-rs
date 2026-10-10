@@ -125,6 +125,9 @@ pub enum AnimationType {
     Karaoke,
     /// Overshooting bounce used by short-form caption styles.
     Bounce,
+    /// Background highlight pill / box behind the active word.
+    #[serde(alias = "highlight_pill", alias = "pill", alias = "box")]
+    HighlightBox,
 }
 
 /// Straight (non-premultiplied) RGBA color with 8 bits per channel.

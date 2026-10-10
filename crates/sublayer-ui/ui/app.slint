@@ -39,6 +39,10 @@ export component MainWindow inherits Window {
     in property <string> active-caption: "";
     in property <[CaptionWord]> caption-words: [];
     in property <bool> show-caption: false;
+    in property <int> preview-font-size: 64;
+    in property <string> preview-font-family: "";
+    in property <int> preview-font-weight: 700;
+    in property <float> preview-em-scale: 1.0;
 
     // Theme mirror.
     in-out property <ThemeData> theme: {
@@ -162,14 +166,16 @@ export component MainWindow inherits Window {
                     caption-words: root.caption-words;
                     show-caption: root.show-caption;
                     timecode: root.preview-timecode;
-                    font-size: root.theme.font-size;
+                    font-size: root.preview-font-size;
+                    font-family: root.preview-font-family;
+                    font-weight: root.preview-font-weight;
+                    em-scale: root.preview-em-scale;
                     primary-color: root.primary-color;
                     highlight-color: root.highlight-color;
                     outline-color: root.outline-color;
                     outline-width: root.theme.outline-width * 1px;
-                    bold: root.theme.bold;
                     uppercase: root.theme.uppercase;
-                    margin-v: root.theme.margin-v;
+                    animation-index: root.theme.animation-index;
                 }
 
                 timeline-view := Timeline {
