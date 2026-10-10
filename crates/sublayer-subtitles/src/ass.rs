@@ -367,17 +367,22 @@ fn pop_tags(word: &WordToken, line_start_ms: u64, theme: &ThemeStyle) -> String 
     )
 }
 
-/// Bounce override for a per-word event: the word springs through a 125 %
-/// peak and an undershoot trough before settling; the colour rides the first
-/// phase up to the highlight and fades back to base during the settle.
+/// Bounce override for a per-word event: a deep spring — the word jumps to
+/// 145 % over 60 ms, dips through 95 %, overshoots to 112 % and settles by
+/// +340 ms; the colour rides the first phase up to the highlight and fades
+/// back to base during the settle.
+///
+/// The phases are deliberately longer and deeper than [`pop_tags`]: at video
+/// frame rates the pop's 115 % puff reads as a blip, and a 125 % spring with
+/// 50 ms phases landed between frames — indistinguishable from the pop.
 fn bounce_tags(word: &WordToken, line_start_ms: u64, theme: &ThemeStyle) -> String {
     let start = word.start_ms.saturating_sub(line_start_ms);
-    let peak = start + 50;
-    let trough = start + 130;
-    let overshoot = start + 200;
-    let settle = start + 280;
+    let peak = start + 60;
+    let trough = start + 150;
+    let overshoot = start + 230;
+    let settle = start + 340;
     format!(
-        "{{\\1c{base}\\t({start},{peak},\\fscx125\\fscy125\\1c{highlight}&)\\t({peak},{trough},\\fscx95\\fscy95)\\t({trough},{overshoot},\\fscx105\\fscy105)\\t({overshoot},{settle},\\fscx100\\fscy100\\1c{base}&)}}",
+        "{{\\1c{base}\\t({start},{peak},\\fscx145\\fscy145\\1c{highlight}&)\\t({peak},{trough},\\fscx95\\fscy95)\\t({trough},{overshoot},\\fscx112\\fscy112)\\t({overshoot},{settle},\\fscx100\\fscy100\\1c{base}&)}}",
         highlight = ass_color(theme.highlight_color),
         base = ass_color(theme.primary_color),
     )
@@ -599,7 +604,7 @@ mod tests {
         )
         .unwrap();
         assert!(script.contains(
-            "{\\an5\\pos(540.0,1287.0)}{\\1c&H00FFFFFF\\t(0,50,\\fscx125\\fscy125\\1c&H00552CFE&)\\t(50,130,\\fscx95\\fscy95)\\t(130,200,\\fscx105\\fscy105)\\t(200,280,\\fscx100\\fscy100\\1c&H00FFFFFF&)}YES"
+            "{\\an5\\pos(540.0,1287.0)}{\\1c&H00FFFFFF\\t(0,60,\\fscx145\\fscy145\\1c&H00552CFE&)\\t(60,150,\\fscx95\\fscy95)\\t(150,230,\\fscx112\\fscy112)\\t(230,340,\\fscx100\\fscy100\\1c&H00FFFFFF&)}YES"
         ));
     }
 
