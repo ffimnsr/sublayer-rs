@@ -4,10 +4,10 @@
 //! timer drains bridge events on the UI thread and refreshes exactly the
 //! properties each event touches.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
 use slint::{ComponentHandle, SharedString, Weak};
@@ -20,11 +20,13 @@ use crate::error::UiError;
 use crate::session::{DragMode, PreviewOutcome, Session};
 use crate::views::{
     UiModels, install_static_options, refresh_caption_drawer, refresh_document, refresh_encoder,
-    refresh_playhead, refresh_segments, refresh_task, refresh_theme, refresh_timeline,
+    refresh_playback, refresh_playhead, refresh_playhead_position, refresh_segments, refresh_task,
+    refresh_theme, refresh_timeline,
 };
 use crate::{MainWindow, ThemeData};
 
-/// Poll interval of the bridge pump; 60 Hz keeps scrubbing responsive.
+/// Poll interval of the bridge pump; 60 Hz keeps scrubbing and playback
+/// responsive.
 const PUMP_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Registers every bundled font with Slint's shared collection, so the
@@ -121,6 +123,7 @@ impl App {
         };
         bridge.probe_render_encoder(preference);
 
+        let last_tick = Rc::new(Cell::new(Instant::now()));
         let timer = slint::Timer::default();
         {
             let weak = ui.as_weak();
@@ -129,8 +132,11 @@ impl App {
             let events = events.clone();
             let media = Rc::clone(&media);
             let models = Rc::clone(&models);
+            let last_tick = Rc::clone(&last_tick);
             timer.start(slint::TimerMode::Repeated, PUMP_INTERVAL, move || {
-                pump(&weak, &bridge, &session, &models, &events, &media)
+                let now = Instant::now();
+                let elapsed = now.saturating_duration_since(last_tick.replace(now));
+                pump(&weak, &bridge, &session, &models, &events, &media, elapsed)
             });
         }
 
@@ -165,6 +171,18 @@ impl App {
         &self.session
     }
 
+    /// Advances playback by `elapsed`, exactly like one pump tick.
+    #[cfg(test)]
+    pub(crate) fn tick(&self, elapsed: Duration) {
+        tick_playback(
+            &self.ui,
+            &self._bridge,
+            &self.session,
+            &self.models,
+            elapsed,
+        );
+    }
+
     /// Re-renders every panel from the current session state.
     pub(crate) fn refresh(&self) {
         let session = self.session.borrow();
@@ -174,6 +192,7 @@ impl App {
         refresh_theme(&self.ui, &session);
         refresh_segments(&self.ui, &session, models);
         refresh_playhead(&self.ui, &session, models);
+        refresh_playback(&self.ui, &session);
         refresh_timeline(&self.ui, &session, models);
         refresh_encoder(&self.ui, &session);
     }
@@ -415,6 +434,25 @@ fn wire_callbacks(
         let session = Rc::clone(session);
         let weak = weak.clone();
         let models = Rc::clone(&models);
+        ui.on_play_toggled(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            session.borrow_mut().toggle_playback();
+            {
+                let session = session.borrow();
+                refresh_playback(&ui, &session);
+                refresh_playhead(&ui, &session, &models);
+            }
+            // Starting chases the clock; pausing lands the exact frame.
+            request_preview(&bridge, &session);
+        });
+    }
+    {
+        let bridge = bridge.clone();
+        let session = Rc::clone(session);
+        let weak = weak.clone();
+        let models = Rc::clone(&models);
         ui.on_segment_selected(move |index| {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -643,12 +681,50 @@ fn pump(
     models: &UiModels,
     events: &Receiver<UiEvent>,
     media: &Rc<MediaFiles>,
+    elapsed: Duration,
 ) {
     let Some(ui) = weak.upgrade() else {
         return;
     };
+    tick_playback(&ui, bridge, session, models, elapsed);
     while let Ok(event) = events.try_recv() {
         handle_event(&ui, bridge, session, models, media, event);
+    }
+}
+
+/// Advances the playhead on the wall clock and keeps the preview chasing it.
+///
+/// Only one decode is in flight at a time (see [`Session::request_preview`]),
+/// so the frame rate falls wherever FFmpeg lands while the playhead never
+/// waits for it.
+fn tick_playback(
+    ui: &MainWindow,
+    bridge: &Bridge,
+    session: &Rc<RefCell<Session>>,
+    models: &UiModels,
+    elapsed: Duration,
+) {
+    let mut guard = session.borrow_mut();
+    if !guard.playing {
+        return;
+    }
+    if !guard.advance_playback(elapsed.as_millis() as u64) {
+        return;
+    }
+    let playing = guard.playing;
+    let scroll_changed = playing && guard.follow_playhead(ui.get_timeline_pixels());
+    let playhead_ms = guard.playhead_ms;
+    refresh_playhead_position(ui, &guard);
+    if scroll_changed {
+        refresh_timeline(ui, &guard, models);
+    }
+    if !playing {
+        // The tick parked on the last frame; flip the transport button back.
+        refresh_playback(ui, &guard);
+    }
+    drop(guard);
+    if playing {
+        spawn_preview(bridge, session, playhead_ms);
     }
 }
 
@@ -746,6 +822,7 @@ fn handle_event(
             refresh_theme(ui, &session.borrow());
             refresh_segments(ui, &session.borrow(), models);
             refresh_playhead(ui, &session.borrow(), models);
+            refresh_playback(ui, &session.borrow());
             refresh_timeline(ui, &session.borrow(), models);
             request_preview(bridge, session);
         }
@@ -777,6 +854,11 @@ fn handle_event(
             let outcome = session.borrow_mut().preview_ready(token, timestamp_ms);
             ui.set_preview_frame(adapters::frame_to_image(&frame));
             ui.set_has_preview(true);
+            // While playing, the caption overlay follows the decode rate; the
+            // playhead itself already moved on the pump clock.
+            if session.borrow().playing {
+                refresh_playhead(ui, &session.borrow(), models);
+            }
             if let PreviewOutcome::Retry(ms) = outcome {
                 spawn_preview(bridge, session, ms);
             }
@@ -800,6 +882,7 @@ fn handle_event(
             refresh_theme(ui, &session.borrow());
             refresh_segments(ui, &session.borrow(), models);
             refresh_playhead(ui, &session.borrow(), models);
+            refresh_playback(ui, &session.borrow());
             refresh_timeline(ui, &session.borrow(), models);
 
             if video_path.is_file() {

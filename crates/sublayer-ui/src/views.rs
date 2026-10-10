@@ -185,11 +185,24 @@ pub(crate) fn refresh_caption_drawer(ui: &MainWindow, session: &Session, models:
     );
 }
 
+/// Pushes the playhead position and timecode.
+///
+/// Cheap enough to run on every playback tick; [`refresh_playhead`] layers the
+/// caption overlay on top of it.
+pub(crate) fn refresh_playhead_position(ui: &MainWindow, session: &Session) {
+    ui.set_playhead_ms(ui_ms(session.playhead_ms));
+    ui.set_preview_timecode(adapters::format_timecode(session.playhead_ms).into());
+}
+
+/// Pushes the play/pause state of the timeline's transport button.
+pub(crate) fn refresh_playback(ui: &MainWindow, session: &Session) {
+    ui.set_playing(session.playing);
+}
+
 /// Pushes the playhead, timecode, and the word-level caption shown over the
 /// frame (the spoken word pops into the highlight color).
 pub(crate) fn refresh_playhead(ui: &MainWindow, session: &Session, models: &UiModels) {
-    ui.set_playhead_ms(ui_ms(session.playhead_ms));
-    ui.set_preview_timecode(adapters::format_timecode(session.playhead_ms).into());
+    refresh_playhead_position(ui, session);
     let caption = session
         .project
         .as_ref()

@@ -97,10 +97,12 @@ cargo build --release -p sublayer-ui -p sublayer-cli --features sublayer-ai/vulk
 5. **Save** — `.sublayer` project files keep the video path, metadata, caption
    cards, and theme together.
 
-Timeline controls: wheel pans, `Ctrl`+wheel zooms, `−`/`+`/`Fit` adjust the
-zoom, and the ruler or waveform seeks. **Right-click the timeline** to add a
-caption whisper missed: a menu offers to insert a placeholder card at that
-time, which you then retype in the inspector or the captions drawer.
+Timeline controls: `Play` moves the playhead on the wall clock while the
+preview decodes frames as it advances, wheel pans, `Ctrl`+wheel zooms,
+`−`/`+`/`Fit` adjust the zoom, and the ruler or waveform seeks. **Right-click
+the timeline** to add a caption whisper missed: a menu offers to insert a
+placeholder card at that time, which you then retype in the inspector or the
+captions drawer.
 
 **Captions drawer** — the header's `Captions` button slides a timestamped,
 YouTube-style list of the caption cards in from the right. Click a row's
@@ -297,8 +299,8 @@ entry, icon, bundled fonts, `AppRun`), optionally bundles host libraries with
 Phases 1–5 of the implementation roadmap are complete: workspace foundation,
 media pipeline, AI speech pipeline, subtitles and animation engine, the Slint
 studio, and hardware-accelerated export with packaging. Known gaps include
-per-render quality settings in the UI (the CLI has `--quality`), real-time
-playback preview while scrubbing, and AppStream metadata for Flathub.
+per-render quality settings in the UI (the CLI has `--quality`), audio during
+the playback preview, and AppStream metadata for Flathub.
 
 ## License
 

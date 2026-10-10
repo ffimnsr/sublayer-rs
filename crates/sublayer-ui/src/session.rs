@@ -122,6 +122,8 @@ pub struct Session {
     pub selected: Option<usize>,
     /// Playhead position in milliseconds.
     pub playhead_ms: u64,
+    /// Whether the playhead is advancing on the wall clock.
+    pub playing: bool,
     /// Time at the left edge of the visible timeline window.
     pub scroll_ms: u64,
     /// Timeline zoom.
@@ -160,6 +162,7 @@ impl Default for Session {
             waveform: None,
             selected: None,
             playhead_ms: 0,
+            playing: false,
             scroll_ms: 0,
             pixels_per_second: DEFAULT_PIXELS_PER_SECOND,
             model_name: "base.en".to_owned(),
@@ -205,6 +208,7 @@ impl Session {
         self.waveform = None;
         self.selected = None;
         self.playhead_ms = 0;
+        self.playing = false;
         self.scroll_ms = 0;
         self.preset_index = preset_index;
         self.drag = None;
@@ -460,6 +464,63 @@ impl Session {
     /// Moves the playhead, clamped to the document.
     pub fn set_playhead(&mut self, ms: u64) {
         self.playhead_ms = ms.min(self.duration_ms());
+    }
+
+    /// Starts or stops the wall-clock playback; returns the new state.
+    ///
+    /// Starting from the end rewinds to the top so the button is never a
+    /// no-op, and a session without a project refuses to start.
+    pub fn toggle_playback(&mut self) -> bool {
+        if self.playing {
+            self.playing = false;
+            return false;
+        }
+        if self.duration_ms() == 0 {
+            return false;
+        }
+        if self.playhead_ms >= self.duration_ms() {
+            self.playhead_ms = 0;
+        }
+        self.playing = true;
+        true
+    }
+
+    /// Advances the playhead by `elapsed_ms` of wall-clock time.
+    ///
+    /// Returns whether the playhead moved. Playback parks on the last frame
+    /// and flips `playing` off, so the caller can return the transport button
+    /// to Play.
+    pub fn advance_playback(&mut self, elapsed_ms: u64) -> bool {
+        let duration_ms = self.duration_ms();
+        if !self.playing || duration_ms == 0 {
+            return false;
+        }
+        let next = self.playhead_ms.saturating_add(elapsed_ms).min(duration_ms);
+        let moved = next != self.playhead_ms;
+        self.playhead_ms = next;
+        if next >= duration_ms {
+            self.playing = false;
+        }
+        moved
+    }
+
+    /// Scrolls the window so a moving playhead stays visible.
+    ///
+    /// When the playhead leaves the viewport it is parked a third of the way
+    /// in, leaving it room to travel before the next page. Returns whether the
+    /// window moved.
+    pub fn follow_playhead(&mut self, viewport_px: f32) -> bool {
+        let viewport_ms = self.viewport_ms(viewport_px) as f64;
+        if viewport_ms <= 0.0 {
+            return false;
+        }
+        let playhead_px = f64::from(self.time_to_px(self.playhead_ms));
+        if (0.0..=f64::from(viewport_px)).contains(&playhead_px) {
+            return false;
+        }
+        let before = self.scroll_ms;
+        self.set_scroll_ms(self.playhead_ms as f64 - viewport_ms / 3.0, viewport_px);
+        self.scroll_ms != before
     }
 
     /// Grid of waveform columns covering the visible window.
@@ -930,5 +991,92 @@ mod tests {
         assert_eq!(session.render_encoder, HardwareEncoder::Nvenc);
         assert_eq!(session.render_fallbacks, vec![HardwareEncoder::Cpu]);
         assert!(session.render_probe.nvenc);
+    }
+
+    #[test]
+    fn toggle_starts_and_stops_playback() {
+        let mut session = session_with(&[]);
+        assert!(!session.playing, "playback is opt-in");
+        assert!(session.toggle_playback());
+        assert!(session.playing);
+        assert!(!session.toggle_playback());
+        assert!(!session.playing);
+    }
+
+    #[test]
+    fn toggle_refuses_without_a_document() {
+        let mut session = Session::default();
+        assert!(!session.toggle_playback());
+        assert!(!session.playing);
+    }
+
+    #[test]
+    fn toggle_from_the_end_rewinds_to_the_top() {
+        let mut session = session_with(&[]);
+        session.set_playhead(30_000);
+        assert!(session.toggle_playback());
+        assert_eq!(session.playhead_ms, 0);
+    }
+
+    #[test]
+    fn playback_advances_on_the_clock_and_parks_at_the_end() {
+        let mut session = session_with(&[]);
+        session.toggle_playback();
+        assert!(session.advance_playback(1_000));
+        assert_eq!(session.playhead_ms, 1_000);
+        assert!(session.playing);
+
+        assert!(session.advance_playback(9_000));
+        assert_eq!(session.playhead_ms, 10_000);
+        assert!(session.playing);
+
+        assert!(session.advance_playback(30_000));
+        assert_eq!(session.playhead_ms, 30_000, "clamped to the document");
+        assert!(!session.playing, "the end stops playback");
+        assert!(!session.advance_playback(500), "stopped playback is frozen");
+        assert_eq!(session.playhead_ms, 30_000);
+    }
+
+    #[test]
+    fn pause_freezes_the_playhead() {
+        let mut session = session_with(&[]);
+        session.toggle_playback();
+        session.advance_playback(2_000);
+        session.toggle_playback();
+        assert!(!session.advance_playback(5_000));
+        assert_eq!(session.playhead_ms, 2_000);
+    }
+
+    #[test]
+    fn installing_a_video_stops_playback() {
+        let mut session = session_with(&[]);
+        session.toggle_playback();
+        assert!(session.playing);
+        session.install_video(project_with_segments(&[]), 0);
+        assert!(!session.playing);
+    }
+
+    #[test]
+    fn follow_playhead_pages_only_when_it_leaves_the_window() {
+        let mut session = session_with(&[]);
+        // 100 px/s over a 1000 px viewport: ten seconds visible.
+        session.pixels_per_second = 100.0;
+        session.scroll_ms = 0;
+
+        session.set_playhead(5_000);
+        assert!(
+            !session.follow_playhead(1_000.0),
+            "playhead already visible"
+        );
+
+        session.set_playhead(12_000);
+        assert!(session.follow_playhead(1_000.0), "playhead left the window");
+        // Parked a third of the viewport in, so it has room to travel.
+        assert!((session.scroll_ms as i64 - 8_667).abs() <= 1);
+        assert!(!session.follow_playhead(1_000.0), "second look is a no-op");
+
+        session.set_playhead(1_000);
+        assert!(session.follow_playhead(1_000.0), "rewind scrolls back");
+        assert_eq!(session.scroll_ms, 0);
     }
 }

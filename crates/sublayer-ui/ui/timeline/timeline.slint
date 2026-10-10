@@ -1,7 +1,8 @@
 // Scrollable timeline: toolbar, ruler, waveform, caption track, and playhead.
 //
-// Zoom and scroll live in Rust; this container only renders the given window
-// and forwards pointer intents (`seek`, wheel, zoom buttons, block drags).
+// Zoom, scroll, and playback live in Rust; this container only renders the
+// given window and forwards pointer intents (`seek`, wheel, zoom buttons,
+// play, block drags).
 
 import { Format, Palette, ToolButton } from "../theme.slint";
 import { Ruler } from "ruler.slint";
@@ -11,6 +12,7 @@ import { SegmentItem, Track } from "track.slint";
 export component Timeline inherits Rectangle {
     in property <int> duration-ms: 0;
     in property <int> playhead-ms: 0;
+    in property <bool> playing: false;
     in property <int> scroll-ms: 0;
     in property <float> pixels-per-second: 50;
     in property <bool> enabled: false;
@@ -25,6 +27,7 @@ export component Timeline inherits Rectangle {
     callback zoom-in-requested();
     callback zoom-out-requested();
     callback zoom-fit-requested();
+    callback play-toggled();
     callback segment-selected(index: int);
     callback segment-drag-begin(index: int, mode: int, pointer-x: length);
     callback segment-drag-move(pointer-x: length);
@@ -64,6 +67,13 @@ export component Timeline inherits Rectangle {
 
             Rectangle { horizontal-stretch: 1; }
 
+            play-button := ToolButton {
+                text: root.playing ? "Pause" : "Play";
+                filled: true;
+                enabled: root.enabled;
+                width: 60px;
+                clicked => { root.play-toggled(); }
+            }
             ToolButton {
                 text: "−";
                 enabled: root.enabled;

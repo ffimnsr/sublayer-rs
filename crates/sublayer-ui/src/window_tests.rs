@@ -8,6 +8,7 @@
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use i_slint_backend_testing::ElementQuery;
 use slint::platform::PointerEventButton;
@@ -523,6 +524,72 @@ fn right_click_on_the_timeline_inserts_a_caption_at_that_time() {
     );
     assert_eq!(ui.get_segments().row_count(), 3);
     assert_eq!(ui.get_caption_rows().row_count(), 3);
+}
+
+#[test]
+fn play_button_runs_the_playhead_on_the_clock() {
+    // A full `App` so the real callbacks are wired; see the drag test.
+    ensure_platform();
+    let app = App::new().expect("the studio must build headlessly");
+    let ui = app.window();
+    ui.window().set_size(PhysicalSize::new(1320, 860));
+    {
+        let mut session = app.session().borrow_mut();
+        session.install_video(project_with_cards(), 0);
+    }
+    app.refresh();
+
+    // Opening a video pauses; playback only starts from the button.
+    assert!(!ui.get_playing());
+
+    // The testing backend starts every gesture at the element's center, so a
+    // zero-distance drag is a click.
+    let click_play_button = || {
+        let button = ElementQuery::from_root(ui)
+            .match_predicate(|element| {
+                element
+                    .id()
+                    .is_some_and(|id| id == "play-button" || id.ends_with("::play-button"))
+            })
+            .find_all()
+            .pop()
+            .expect("the play button must be addressable");
+        button.mock_drag(
+            LogicalPosition::new(
+                button.absolute_position().x + button.size().width / 2.0,
+                button.absolute_position().y + button.size().height / 2.0,
+            ),
+            PointerEventButton::Left,
+        );
+    };
+
+    click_play_button();
+    assert!(app.session().borrow().playing, "the button starts playback");
+    assert!(ui.get_playing(), "the button flips to Pause");
+
+    // A quarter second of wall clock moves the playhead and its readouts.
+    app.tick(Duration::from_millis(250));
+    assert_eq!(app.session().borrow().playhead_ms, 250);
+    assert_eq!(ui.get_playhead_ms(), 250);
+
+    // Clicking again pauses in place.
+    click_play_button();
+    assert!(!app.session().borrow().playing);
+    assert!(!ui.get_playing());
+    app.tick(Duration::from_millis(250));
+    assert_eq!(
+        app.session().borrow().playhead_ms,
+        250,
+        "paused playback freezes"
+    );
+
+    // Playing through the end parks on the last frame and flips back to Play.
+    click_play_button();
+    app.tick(Duration::from_secs(30));
+    assert_eq!(app.session().borrow().playhead_ms, 10_000);
+    assert_eq!(ui.get_playhead_ms(), 10_000);
+    assert!(!app.session().borrow().playing);
+    assert!(!ui.get_playing(), "the button returns to Play");
 }
 
 #[test]
