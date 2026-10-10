@@ -4,27 +4,22 @@
 //! font size, outline, shadow, and margins are scaled from the 1080p reference
 //! the theme presets are tuned for.
 //!
-//! Animations reuse whisper's own word timings, shifted to the card's local
-//! timeline — libass applies each override block the moment its clock reaches
-//! the word's start, so the pop/bounce lands on the spoken word even though
-//! the whole card is one `Dialogue` line.
+//! Per-word animation rides one of two layouts, chosen per theme:
 //!
-//! Per-word animation is safe only because that line uses `\k`-style karaoke
-//! tags, which are keyed per word. Transform overrides (`\fscx`, `\1c`, …)
-//! ride the line's fill state, so during any word's pop window **every
-//! later word would animate along** — the whole caption visibly scaling
-//! together. The pop families therefore highlight the spoken word instead
-//! of scaling it:
+//! * **Karaoke** keeps one `Dialogue` line per card and animates only with
+//!   `\k` fills, which libass keys per word (sweep keyed to the word's own
+//!   duration; the Secondary Colour carries the highlight).
+//! * **WordPop** and **Bounce** need transforms (`\fscx`, `\1c`, …). A
+//!   transform override on a shared line changes the fill state for **every
+//!   later word**, so the whole caption would scale along with the spoken
+//!   word. The compiler instead emits one `Dialogue` event per word, each
+//!   anchored with `\an5\pos(x, y)` at the position the word would occupy in
+//!   the composed line (computed from the same font metrics the auto-fit
+//!   uses). Transforms then hit exactly the word the line holds:
+//!   WordPop springs the word to 115 %, Bounce overshoots through 125 %.
 //!
-//! * **Karaoke** — `{\k}` sweep keyed to the word duration; the Secondary
-//!   Colour (set to the theme's highlight) fills over the base colour.
-//! * **WordPop** — `{\K}` instant fill: the spoken word snaps into the
-//!   highlight for exactly its duration and snaps back.
-//! * **Bounce** — `{\k}` sweep like karaoke; kept as a preset-pickable
-//!   variant that does not scale the line.
-//!
-//! Layout: the card is auto-fitted (never wrapped, `WrapStyle: 2`) so the
-//! whole line lands on one baseline; karaoke fills change no geometry.
+//! Layout: cards are auto-fitted (never wrapped, `WrapStyle: 2`), and pop
+//! events reuse the fitted size so both layouts render the same geometry.
 //!
 //! When `fonts_dir` is non-empty, a `[Fonts]` section pins libass to the
 //! bundled font directory so rendering is deterministic across systems.
@@ -45,6 +40,10 @@ const FALLBACK_RESOLUTION: (u32, u32) = (1920, 1080);
 
 /// The reference height the theme presets are tuned against.
 const REFERENCE_HEIGHT: f32 = 1080.0;
+
+/// Horizontal style margin from the `[V4+ Styles]` block (`MarginL/MarginR`),
+/// in script pixels; pop-line positioning mirrors it.
+const STYLE_MARGIN_H: f32 = 40.0;
 
 /// Style name used by every dialogue line.
 const STYLE_NAME: &str = "Caption";
@@ -69,7 +68,6 @@ pub fn build_ass_script(
     let font_size = scaled_font_size(theme, scale);
     let font_data = metrics::theme_font_data(fonts_dir, &theme.font_name);
     let measurer = Measurer::new(font_data.as_deref());
-    let card_width = metrics::max_card_width(width);
 
     let mut script = String::new();
     script_info(&mut script, width, height);
@@ -85,7 +83,8 @@ pub fn build_ass_script(
             theme,
             &measurer,
             font_size,
-            card_width,
+            width,
+            height,
         );
     }
     Ok(script)
@@ -148,27 +147,139 @@ fn events_header(out: &mut String) {
     );
 }
 
-/// Appends one `Dialogue` line for `segment`, shrinking the font when the card
-/// would overflow the frame.
+/// Appends the `Dialogue` line(s) for `segment`, shrinking the font when the
+/// card would overflow the frame.
+///
+/// Karaoke and static cards produce one line; WordPop and Bounce produce one
+/// positioned event per word (see the module docs), so their transforms only
+/// ever cover the spoken word.
 fn dialogue(
     out: &mut String,
     segment: &CaptionSegment,
     theme: &ThemeStyle,
     measurer: &Measurer<'_>,
     font_size: u32,
-    card_width: f32,
+    frame_width: u32,
+    frame_height: u32,
 ) {
     let Some(first) = segment.start_ms() else {
         return;
     };
     let end = segment.end_ms().unwrap_or(first).max(first);
-    let fitted = measurer.fitted_font_size(&card_text(segment, theme), font_size, card_width);
+    let fitted = measurer.fitted_font_size(
+        &card_text(segment, theme),
+        font_size,
+        metrics::max_card_width(frame_width),
+    );
+    if matches!(
+        theme.animation,
+        AnimationType::WordPop | AnimationType::Bounce
+    ) {
+        pop_dialogues(
+            out,
+            segment,
+            theme,
+            measurer,
+            fitted,
+            font_size,
+            frame_width,
+            frame_height,
+        );
+        return;
+    }
     out.push_str(&format!(
         "Dialogue: 0,{start},{end},{STYLE_NAME},,0,0,0,,{text}\n",
         start = ass_time(first),
         end = ass_time(end),
         text = dialogue_text(segment, theme, fitted, font_size),
     ));
+}
+
+/// Emits one `\an5\pos`-anchored `Dialogue` event per word for the transform-
+/// based animations.
+///
+/// Word positions come from the same font metrics as the auto-fit: each word
+/// sits where the composed line would place it, horizontally aligned per the
+/// theme and vertically centered on the line box. A per-word event means the
+/// pop transforms in `pop_tags`/`bounce_tags` animate exactly that word.
+#[allow(clippy::too_many_arguments)]
+fn pop_dialogues(
+    out: &mut String,
+    segment: &CaptionSegment,
+    theme: &ThemeStyle,
+    measurer: &Measurer<'_>,
+    fitted_size: u32,
+    font_size: u32,
+    frame_width: u32,
+    frame_height: u32,
+) {
+    let words: Vec<&WordToken> = segment
+        .words
+        .iter()
+        .filter(|word| !word.text.trim().is_empty())
+        .collect();
+    if words.is_empty() {
+        return;
+    }
+    let size = fitted_size as f32;
+    let display: Vec<String> = words
+        .iter()
+        .map(|word| {
+            if theme.uppercase {
+                word.text.to_uppercase()
+            } else {
+                word.text.clone()
+            }
+        })
+        .collect();
+    let widths: Vec<f32> = display
+        .iter()
+        .map(|text| measurer.text_width_px(text, size))
+        .collect();
+    let space = measurer.text_width_px(" ", size);
+    let total: f32 = widths.iter().sum::<f32>() + space * (words.len() - 1) as f32;
+    let frame_width = frame_width as f32;
+    let frame_height = frame_height as f32;
+
+    let line_left = match theme.alignment.clamp(1, 9) {
+        1 | 4 | 7 => STYLE_MARGIN_H,
+        3 | 6 | 9 => frame_width - STYLE_MARGIN_H - total,
+        _ => (frame_width - total) / 2.0,
+    };
+    let (ascent, descent) = measurer.line_vertical_extent(size);
+    let line_height = ascent + descent;
+    let margin_v = (theme.margin_v as f32 * (frame_height / REFERENCE_HEIGHT)).round();
+    let center_y = match theme.alignment.clamp(1, 9) {
+        7..=9 => margin_v + line_height / 2.0,
+        4..=6 => frame_height / 2.0,
+        _ => frame_height - margin_v - line_height / 2.0,
+    };
+
+    let mut cursor = line_left;
+    for (word, width) in words.into_iter().zip(&widths) {
+        let start = word.start_ms;
+        let end = word.end_ms.max(start + 1);
+        let tags = match theme.animation {
+            // The event clock starts at the word, so its transform windows
+            // are relative to `word.start_ms` (they resolve to `0..` here).
+            AnimationType::Bounce => bounce_tags(word, word.start_ms, theme),
+            _ => pop_tags(word, word.start_ms, theme),
+        };
+        out.push_str(&format!(
+            "Dialogue: 0,{start_time},{end_time},{STYLE_NAME},,0,0,0,,{{\\an5\\pos({x:.1},{y:.1})}}",
+            start_time = ass_time(start),
+            end_time = ass_time(end),
+            x = cursor + width / 2.0,
+            y = center_y,
+        ));
+        if fitted_size < font_size {
+            out.push_str(&format!("{{\\fs{fitted_size}}}"));
+        }
+        out.push_str(&tags);
+        out.push_str(&word_text(word, theme));
+        out.push('\n');
+        cursor += width + space;
+    }
 }
 
 /// The card's visible text, used for width measurement.
@@ -207,13 +318,9 @@ fn dialogue_text(
                 out.push_str(&format!("{{\\k{}}}", karaoke_cs(word)));
                 out.push_str(&word_text(word, theme));
             }
-            AnimationType::WordPop => {
-                out.push_str(&format!("{{\\K{}}}", karaoke_cs(word)));
-                out.push_str(&word_text(word, theme));
-            }
-            AnimationType::Bounce => {
-                out.push_str(&format!("{{\\k{}}}", karaoke_cs(word)));
-                out.push_str(&word_text(word, theme));
+            // Pop families are emitted as per-word events in `pop_dialogues`.
+            AnimationType::WordPop | AnimationType::Bounce => {
+                unreachable!("pop cards render as per-word dialogue events")
             }
         }
         out.push(' ');
@@ -235,6 +342,39 @@ fn word_text(word: &WordToken, theme: &ThemeStyle) -> String {
 /// visible word.
 fn karaoke_cs(word: &WordToken) -> u64 {
     (word.duration_ms() / 10).clamp(1, 6000)
+}
+
+/// Word-pop override for a per-word event (whose clock starts at the word):
+/// the word springs out to 115 % and shifts to the highlight over 80 ms, then
+/// settles back to the base scale and colour by +200 ms.
+///
+/// The event covers exactly one word, so libass's per-line fill state cannot
+/// leak the transform into neighbouring words.
+fn pop_tags(word: &WordToken, line_start_ms: u64, theme: &ThemeStyle) -> String {
+    let start = word.start_ms.saturating_sub(line_start_ms);
+    let grow = start + 80;
+    let settle = start + 200;
+    format!(
+        "{{\\1c{base}\\t({start},{grow},\\fscx115\\fscy115\\1c{highlight}&)\\t({grow},{settle},\\fscx100\\fscy100\\1c{base}&)}}",
+        highlight = ass_color(theme.highlight_color),
+        base = ass_color(theme.primary_color),
+    )
+}
+
+/// Bounce override for a per-word event: the word springs through a 125 %
+/// peak and an undershoot trough before settling; the colour rides the first
+/// phase up to the highlight and fades back to base during the settle.
+fn bounce_tags(word: &WordToken, line_start_ms: u64, theme: &ThemeStyle) -> String {
+    let start = word.start_ms.saturating_sub(line_start_ms);
+    let peak = start + 50;
+    let trough = start + 130;
+    let overshoot = start + 200;
+    let settle = start + 280;
+    format!(
+        "{{\\1c{base}\\t({start},{peak},\\fscx125\\fscy125\\1c{highlight}&)\\t({peak},{trough},\\fscx95\\fscy95)\\t({trough},{overshoot},\\fscx105\\fscy105)\\t({overshoot},{settle},\\fscx100\\fscy100\\1c{base}&)}}",
+        highlight = ass_color(theme.highlight_color),
+        base = ass_color(theme.primary_color),
+    )
 }
 
 /// Formats milliseconds as `H:MM:SS.cc` (ASS centisecond timestamps).
@@ -387,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn word_pop_lines_highlight_the_spoken_word() {
+    fn word_pop_lines_are_one_event_per_word() {
         let theme = themes::hormozi_bold();
         let script = build_ass_script(
             &[segment(&["Go"])],
@@ -396,16 +536,20 @@ mod tests {
             Path::new(""),
         )
         .unwrap();
-        // The 400 ms word gets an instant `\K` fill of 40 cs: the word snaps
-        // into the highlight (the style's SecondaryColour) for its duration.
-        assert!(script.contains("Dialogue: 0,0:00:00.00,0:00:00.40,Caption,,0,0,0,,{\\K40}GO"));
+        // Font 76 -> 135 script px; "GO" measures 194.4 px wide (fallback
+        // estimator), centered at x=540; the line box centers at
+        // 1920 - 533 (scaled margin) - 135/2 = 1319.5. The transforms live on
+        // the word's own event, so nothing else can animate along.
+        assert!(script.contains(
+            "Dialogue: 0,0:00:00.00,0:00:00.40,Caption,,0,0,0,,{\\an5\\pos(540.0,1319.5)}{\\1c&H00FFFFFF\\t(0,80,\\fscx115\\fscy115\\1c&H0000D4FF&)\\t(80,200,\\fscx100\\fscy100\\1c&H00FFFFFF&)}GO"
+        ));
     }
 
     #[test]
-    fn pop_lines_never_scale_the_whole_caption() {
-        // Regression: a `\t`/`\fscx` override on one word of a single
-        // Dialogue line animates every later word along with it, so the whole
-        // caption grew in unison. Pop families must stay fill-only.
+    fn pop_words_own_their_dialogue_event() {
+        // Regression: a `\t`/`\fscx` override sharing a line with other words
+        // animates all of them. Every transformed event must hold exactly one
+        // word, anchored by its own `\pos`.
         for theme in [themes::hormozi_bold(), themes::tiktok_classic()] {
             let script = build_ass_script(
                 &[segment(&["Hello", "world!"])],
@@ -414,15 +558,46 @@ mod tests {
                 Path::new(""),
             )
             .unwrap();
-            assert!(!script.contains(r"\fscx"), "{theme:?}: no scale overrides");
-            assert!(!script.contains(r"\t("), "{theme:?}: no animated overrides");
-            let fill = if theme.animation == AnimationType::WordPop {
-                "{\\K40}HELLO {\\K40}WORLD!"
-            } else {
-                "{\\k40}HELLO {\\k40}WORLD!"
-            };
-            assert!(script.contains(fill), "{theme:?}: per-word fill");
+            let animated: Vec<&str> = script
+                .lines()
+                .filter(|line| line.starts_with("Dialogue:") && line.contains("\\fscx"))
+                .collect();
+            assert_eq!(animated.len(), 2, "{theme:?}: one event per word");
+            for line in animated {
+                assert!(line.contains("\\an5\\pos("), "{theme:?}: positioned");
+                let words = ["HELLO", "WORLD!"]
+                    .iter()
+                    .filter(|word| line.contains(**word))
+                    .count();
+                assert_eq!(words, 1, "{theme:?}: exactly one word per event: {line}");
+            }
+            // The events keep the card's exact word timings.
+            assert!(
+                script.contains("Dialogue: 0,0:00:00.00,0:00:00.40,"),
+                "{script}"
+            );
+            assert!(
+                script.contains("Dialogue: 0,0:00:00.50,0:00:00.90,"),
+                "{script}"
+            );
         }
+    }
+
+    #[test]
+    fn bounce_lines_are_one_event_per_word() {
+        // Font 72 -> 128 script px; "YES" measures 276.48 px, centered at
+        // x=540; the line box centers at 1920 - 569 (scaled margin) - 64.
+        let theme = themes::tiktok_classic();
+        let script = build_ass_script(
+            &[segment(&["Yes"])],
+            &theme,
+            &metadata(1080, 1920),
+            Path::new(""),
+        )
+        .unwrap();
+        assert!(script.contains(
+            "{\\an5\\pos(540.0,1287.0)}{\\1c&H00FFFFFF\\t(0,50,\\fscx125\\fscy125\\1c&H00552CFE&)\\t(50,130,\\fscx95\\fscy95)\\t(130,200,\\fscx105\\fscy105)\\t(200,280,\\fscx100\\fscy100\\1c&H00FFFFFF&)}YES"
+        ));
     }
 
     #[test]
@@ -477,15 +652,20 @@ mod tests {
             Path::new(""),
         )
         .unwrap();
+        // Bounce renders per-word events; the first word's event carries the
+        // fitted `\fs` (the 128 px style font would overflow the frame).
         let line = script
             .lines()
-            .find(|line| line.starts_with("Dialogue:"))
+            .find(|line| line.starts_with("Dialogue:") && line.contains("WHOS"))
             .expect("dialogue line");
         let (_, text) = line.rsplit_once(",,").unwrap();
-        // The style font is 72 * 1920/1080 = 128; the card is too wide for the
-        // 1080 px frame and must carry a smaller `\fs` override.
-        assert!(text.starts_with("{\\fs"), "{text}");
-        let size: u32 = text[4..].split('}').next().unwrap().parse().unwrap();
+        assert!(text.contains("{\\fs"), "{text}");
+        let size: u32 = text
+            .split("{\\fs")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .and_then(|value| value.parse().ok())
+            .unwrap();
         assert!((16..128).contains(&size), "fitted to {size}");
     }
 
@@ -501,10 +681,10 @@ mod tests {
         .unwrap();
         let line = script
             .lines()
-            .find(|line| line.starts_with("Dialogue:"))
+            .find(|line| line.starts_with("Dialogue:") && line.contains("YES"))
             .unwrap();
         let (_, text) = line.rsplit_once(",,").unwrap();
-        assert!(!text.starts_with("{\\fs"), "{text}");
+        assert!(!text.contains("{\\fs"), "{text}");
     }
 
     #[test]

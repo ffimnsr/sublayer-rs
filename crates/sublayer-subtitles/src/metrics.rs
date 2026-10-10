@@ -32,6 +32,11 @@ const FALLBACK_GLYPH_EM: f32 = 0.72;
 /// Advance width of a space (in em) used by the fallback estimator.
 const FALLBACK_SPACE_EM: f32 = 0.28;
 
+/// Fallback line ascent/descent (in em) when no font face is available; the
+/// per-word pop positioning centers text with these.
+const FALLBACK_ASCENT_EM: f32 = 0.8;
+const FALLBACK_DESCENT_EM: f32 = 0.2;
+
 /// Floor for the fitted font size, in script pixels; only pathological cards
 /// reach it.
 const MIN_FONT_SIZE: u32 = 16;
@@ -47,6 +52,10 @@ pub(crate) struct Measurer<'a> {
     /// Converts a style font size into the em size libass renders
     /// (`unitsPerEm / (winAscent + winDescent)`); `1.0` without a face.
     size_scale: f32,
+    /// Ascender/descender in font units (OS/2 Windows metrics when present,
+    /// the face's own otherwise); `0, 0` without a face.
+    ascent_units: u16,
+    descent_units: u16,
 }
 
 impl<'a> Measurer<'a> {
@@ -58,7 +67,21 @@ impl<'a> Measurer<'a> {
             (Some(face), Some(data)) => real_dim_scale(face, data),
             _ => 1.0,
         };
-        Self { face, size_scale }
+        let (ascent_units, descent_units) = match (face.as_ref(), data) {
+            (Some(face), data) => data.and_then(win_vertical_metrics).unwrap_or_else(|| {
+                (
+                    face.ascender().max(0) as u16,
+                    face.descender().unsigned_abs(),
+                )
+            }),
+            (None, _) => (0, 0),
+        };
+        Self {
+            face,
+            size_scale,
+            ascent_units,
+            descent_units,
+        }
     }
 
     /// Largest size ≤ `font_size` at which `text` fits `max_width_px`.
@@ -75,7 +98,7 @@ impl<'a> Measurer<'a> {
 
     /// Width of `text` at `font_size`, by glyph advances when the font is
     /// available and by the fallback estimate otherwise.
-    fn text_width_px(&self, text: &str, font_size: f32) -> f32 {
+    pub(crate) fn text_width_px(&self, text: &str, font_size: f32) -> f32 {
         let Some(face) = self.face.as_ref() else {
             return fallback_width_px(text, font_size);
         };
@@ -93,6 +116,29 @@ impl<'a> Measurer<'a> {
             })
             .sum();
         advances / units * em
+    }
+
+    /// Ascender and descender height in pixels at `font_size`, matching the
+    /// box libass centers `\an5` positions on.
+    pub(crate) fn line_vertical_extent(&self, font_size: f32) -> (f32, f32) {
+        let fallback = || {
+            (
+                font_size * FALLBACK_ASCENT_EM,
+                font_size * FALLBACK_DESCENT_EM,
+            )
+        };
+        let Some(face) = self.face.as_ref() else {
+            return fallback();
+        };
+        let units = f32::from(face.units_per_em());
+        if units <= 0.0 || (self.ascent_units == 0 && self.descent_units == 0) {
+            return fallback();
+        }
+        let em = font_size * self.size_scale;
+        (
+            em * f32::from(self.ascent_units) / units,
+            em * f32::from(self.descent_units) / units,
+        )
     }
 }
 
