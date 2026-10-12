@@ -1,0 +1,39 @@
+[package]
+name = "sublayer-translate"
+description = "Sentence-level translation backends for live captions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# `translate_async` runs Send backends on the blocking pool.
+tokio.workspace = true
+
+# Local NMT: fxtranslate, the pure-Rust port of the Firefox Translations
+# (Bergamot / opus-mt) inference engine. MPL-2.0. Model files are the usual
+# Firefox Translations bundle (model.intgemm.alphas.bin, lex.50.12k.s2t.bin,
+# vocab.spm). See sublayer-translate/src/local.rs.
+fxtranslate = { version = "0.5", optional = true }
+
+# Remote backend over the OpenAI-compatible chat-completions API.
+reqwest = { workspace = true, features = ["blocking", "json"], optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+default = ["remote-translate"]
+# OpenAI-compatible HTTP backend (works with OpenAI, Groq, LM Studio,
+# Ollama, llama.cpp servers, ...).
+remote-translate = ["dep:reqwest", "dep:serde", "dep:serde_json"]
+# Offline NMT backend built on fxtranslate.
+local-translate = ["dep:fxtranslate"]
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -13,6 +13,7 @@ members = [
     "crates/sublayer-whisper",
     "crates/sublayer-subtitles",
     "crates/sublayer-export",
+    "crates/sublayer-translate",
     "crates/sublayer-ui",
     "crates/sublayer-cli",
 ]
@@ -33,6 +34,7 @@ sublayer-ai = { path = "crates/sublayer-ai" }
 sublayer-whisper = { path = "crates/sublayer-whisper" }
 sublayer-subtitles = { path = "crates/sublayer-subtitles" }
 sublayer-export = { path = "crates/sublayer-export" }
+sublayer-translate = { path = "crates/sublayer-translate" }
 sublayer-ui = { path = "crates/sublayer-ui" }
 sublayer-cli = { path = "crates/sublayer-cli" }
 

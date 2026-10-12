@@ -46,6 +46,12 @@ video ──▶ ffprobe ──▶ 16 kHz audio ──▶ Whisper (VAD + word tim
   (`LiveTranscriber` / `LiveCaptioner`) that emit word timestamps on the
   media timeline from a dedicated worker thread — the engine behind the
   upcoming live-caption player (`sublayer-player`, Phase 6).
+- **Live translation backends**: `sublayer-translate` translates live
+  captions **into English** — offline via the pure-Rust Firefox Translations /
+  Bergamot engine (`local-translate` feature, bundled source languages:
+  Chinese (Simplified, Mandarin), Japanese, Korean, Spanish, Danish, Russian,
+  incl. the split-vocabulary CJK bundles) or any OpenAI-compatible endpoint
+  (`remote-translate`, default).
 - **Headless CLI** for batch and CI workloads: `probe`, `transcribe`, `render`.
 - **Packaging**: Flatpak manifest (`--device=dri`, Wayland & PipeWire sockets)
   and an AppImage build script.
@@ -61,8 +67,9 @@ video ──▶ ffprobe ──▶ 16 kHz audio ──▶ Whisper (VAD + word tim
 | GPU | optional: Vulkan for Whisper, VA-API/NVENC for encoding, `--device=dri` when sandboxed |
 
 Whisper models are downloaded on demand into `$XDG_DATA_HOME/sublayer/models/`
-and verified against pinned SHA-256 digests. Pinned names: `tiny.en`,
-`base.en`, `small.en`, `large-v3-turbo`.
+and verified against pinned SHA-256 digests. Pinned names: `tiny`, `tiny.en`,
+`base`, `base.en`, `small`, `small.en`, `large-v3-turbo` (the multilingual
+variants are the ones to pair with live translation).
 
 ## Build and run
 
@@ -192,6 +199,7 @@ flow; the UI and CLI are thin shells over the engine crates.
 | `sublayer-ai` | Model downloader with SHA-256 verification, VAD, Whisper transcription with word timestamps |
 | `sublayer-whisper` | Leak-free safe bindings to whisper.cpp over the raw `whisper-rs-sys` FFI; the only crate allowed `unsafe` |
 | `sublayer-subtitles` | Word clustering, ASS/SRT/VTT compilation, theme presets and JSON I/O, font directory resolution |
+| `sublayer-translate` | Sentence-level translation backends: local fxtranslate/Bergamot engine (`local-translate`) and OpenAI-compatible remote (`remote-translate`) |
 | `sublayer-export` | VA-API/NVENC/Vulkan/CPU probing, FFmpeg burn-in runner, progress and ETA stream |
 | `sublayer-ui` | Slint desktop studio (window, timeline, inspector, bridge to Tokio) |
 | `sublayer-cli` | `sublayer` binary: probe, transcribe, render |
@@ -320,5 +328,7 @@ Two exceptions to keep in mind:
   Distributing binaries that link `sublayer-ui` is therefore subject to
   Slint's terms — see the Slint licensing documentation for which option
   applies to your use case.
+- **fxtranslate** (the local translation engine behind `sublayer-translate`'s
+  `local-translate` feature) is licensed under `MPL-2.0`.
 - **Bundled fonts** in `assets/fonts/` are SIL OFL 1.1; see
   [`assets/fonts/README.md`](assets/fonts/README.md).

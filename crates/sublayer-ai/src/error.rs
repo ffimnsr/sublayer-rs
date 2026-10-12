@@ -6,7 +6,9 @@ use std::path::PathBuf;
 #[derive(Debug, thiserror::Error)]
 pub enum AiError {
     /// The requested model is not in the known-model table.
-    #[error("unknown model `{0}`; known models: tiny.en, base.en, small.en, large-v3-turbo")]
+    #[error(
+        "unknown model `{0}`; known models: tiny, tiny.en, base, base.en, small, small.en, large-v3-turbo"
+    )]
     UnknownModel(String),
 
     /// The HTTP client could not be constructed.

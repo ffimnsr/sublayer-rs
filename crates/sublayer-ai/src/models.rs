@@ -43,6 +43,10 @@ impl ModelSpec {
 }
 
 /// Known models. Digests are the Hugging Face LFS SHA-256 of each file.
+///
+/// The multilingual variants (`tiny`, `base`, `small`) recognize ~100
+/// languages and are the ones to pair with live translation; the `.en`
+/// variants are stricter about English-only audio.
 pub const MODELS: &[ModelSpec] = &[
     ModelSpec {
         name: "tiny.en",
@@ -51,16 +55,34 @@ pub const MODELS: &[ModelSpec] = &[
         sha256: "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
     },
     ModelSpec {
+        name: "tiny",
+        file_name: "ggml-tiny.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
+        sha256: "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+    },
+    ModelSpec {
         name: "base.en",
         file_name: "ggml-base.en.bin",
         url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
         sha256: "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
     },
     ModelSpec {
+        name: "base",
+        file_name: "ggml-base.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+        sha256: "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+    },
+    ModelSpec {
         name: "small.en",
         file_name: "ggml-small.en.bin",
         url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
         sha256: "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+    },
+    ModelSpec {
+        name: "small",
+        file_name: "ggml-small.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+        sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
     },
     ModelSpec {
         name: "large-v3-turbo",
