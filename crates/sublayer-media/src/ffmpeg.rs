@@ -68,7 +68,7 @@ pub fn failure(binary: &'static str, status: ExitStatus, stderr: &[u8]) -> Media
 }
 
 /// Renders the command as a single line for debug logs.
-fn describe(command: &Command) -> String {
+pub(crate) fn describe(command: &Command) -> String {
     let std_command = command.as_std();
     let mut text = std_command.get_program().to_string_lossy().into_owned();
     for argument in std_command.get_args() {

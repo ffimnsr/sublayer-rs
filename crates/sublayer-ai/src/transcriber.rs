@@ -224,7 +224,7 @@ fn transcribe_blocking(
     let windows = speech_windows(&samples, config.enable_vad);
     let window_count = windows.len().max(1) as f32;
     for (index, window) in windows.iter().enumerate() {
-        let mut params = make_params(config);
+        let mut params = make_params(config.language.as_deref(), config.threads);
         let sender = progress_tx.clone();
         let window_index = index as f32;
         let mut progress = move |percent: i32| {
@@ -247,10 +247,10 @@ fn transcribe_blocking(
 }
 
 /// Builds the decoding parameters shared by every window.
-fn make_params<'a>(config: &TranscriberConfig) -> FullParams<'a> {
+pub(crate) fn make_params<'a>(language: Option<&str>, threads: usize) -> FullParams<'a> {
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    params.set_n_threads(config.threads.clamp(1, 64) as i32);
-    params.set_language(config.language.as_deref());
+    params.set_n_threads(threads.clamp(1, 64) as i32);
+    params.set_language(language);
     // Word-level timestamps via whisper.cpp's token alignment.
     params.set_token_timestamps(true);
     params.set_split_on_word(true);
@@ -301,7 +301,7 @@ fn normalize_word_times(words: &mut [WordToken]) {
 
 /// Collects the window's tokens into `words`, shifting timestamps by
 /// `offset_ms` (the window's position in the source audio).
-fn append_words(state: &WhisperState<'_>, words: &mut Vec<WordToken>, offset_ms: u64) {
+pub(crate) fn append_words(state: &WhisperState<'_>, words: &mut Vec<WordToken>, offset_ms: u64) {
     let tokens: Vec<(String, i64, i64)> = state
         .segments()
         .filter(|segment| segment.no_speech_probability() <= NO_SPEECH_FILTER_THRESHOLD)

@@ -59,6 +59,10 @@ pub enum AiError {
     #[error("background transcription task failed: {0}")]
     TaskJoin(String),
 
+    /// The live worker exited before a command could be delivered.
+    #[error("background worker is shut down")]
+    WorkerShutdown,
+
     /// Filesystem interaction failed.
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),

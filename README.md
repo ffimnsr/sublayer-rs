@@ -41,6 +41,11 @@ video ──▶ ffprobe ──▶ 16 kHz audio ──▶ Whisper (VAD + word tim
   back to `libx264`, retrying at runtime when a probed encoder cannot start
   (a Vulkan backend is compiled in only with the `encode_vulkan` feature);
   streams percentage, fps, and ETA while rendering.
+- **Live caption foundations**: a streaming 16 kHz PCM pipe
+  (`stream_audio_16k`) and a VAD-gated rolling-window transcriber
+  (`LiveTranscriber` / `LiveCaptioner`) that emit word timestamps on the
+  media timeline from a dedicated worker thread — the engine behind the
+  upcoming live-caption player (`sublayer-player`, Phase 6).
 - **Headless CLI** for batch and CI workloads: `probe`, `transcribe`, `render`.
 - **Packaging**: Flatpak manifest (`--device=dri`, Wayland & PipeWire sockets)
   and an AppImage build script.
@@ -298,7 +303,9 @@ entry, icon, bundled fonts, `AppRun`), optionally bundles host libraries with
 
 Phases 1–5 of the implementation roadmap are complete: workspace foundation,
 media pipeline, AI speech pipeline, subtitles and animation engine, the Slint
-studio, and hardware-accelerated export with packaging. Known gaps include
+studio, and hardware-accelerated export with packaging. Phase 6 (the
+live-caption player) is underway — the streaming audio decode and the live
+ASR driver are in. Known gaps include
 per-render quality settings in the UI (the CLI has `--quality`), audio during
 the playback preview, and AppStream metadata for Flathub.
 

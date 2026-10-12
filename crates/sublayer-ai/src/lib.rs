@@ -8,11 +8,13 @@
 //! runtime falls back to CPU when the backend is not compiled in.
 
 pub mod error;
+pub mod live;
 pub mod models;
 pub mod transcriber;
 pub mod vad;
 
 pub use error::AiError;
+pub use live::{LiveCaptioner, LiveEvent, LiveTranscriber, LiveTranscriberConfig};
 pub use models::{MODELS, ModelManager, ModelSpec};
 pub use transcriber::{TranscriberConfig, WHISPER_SAMPLE_RATE, transcribe_audio};
 pub use vad::{SpeechSegment, VadConfig, detect_speech};

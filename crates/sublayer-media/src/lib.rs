@@ -13,7 +13,7 @@ pub mod preview;
 pub mod probe;
 pub mod waveform;
 
-pub use audio::{WHISPER_SAMPLE_RATE, extract_audio_16k};
+pub use audio::{AudioPcmStream, WHISPER_SAMPLE_RATE, extract_audio_16k, stream_audio_16k};
 pub use error::MediaError;
 pub use preview::{DEFAULT_MAX_DIMENSION, PreviewConfig, RgbaFrame, decode_frame_at};
 pub use probe::probe_video;
@@ -48,7 +48,12 @@ pub(crate) mod test_util {
             .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y"])
             .args(["-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30"]);
         if with_audio {
-            command.args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"]);
+            command.args([
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:amplitude=0.9",
+            ]);
         }
         command.args(["-t", "1", "-c:v", "mpeg4", "-q:v", "5"]);
         if with_audio {

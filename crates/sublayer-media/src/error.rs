@@ -71,6 +71,10 @@ pub enum MediaError {
         input: PathBuf,
     },
 
+    /// The live PCM stream ended on a partial sample (ffmpeg died mid-write).
+    #[error("audio stream ended on a partial sample")]
+    TruncatedAudioStream,
+
     /// FFprobe printed output that does not match the expected schema.
     #[error("ffprobe returned malformed JSON: {0}")]
     InvalidProbeData(String),
