@@ -17,12 +17,11 @@ path = "src/main.rs"
 sublayer-core.workspace = true
 sublayer-media.workspace = true
 sublayer-ai.workspace = true
-sublayer-translate = { workspace = true, features = ["local-translate"] }
+sublayer-translate = { workspace = true, features = ["local-translate", "download"] }
 slint.workspace = true
-# Audio output (ALSA/JACK via cpal) is opt-in: like `encode_vulkan`, it
-# needs host dev libraries (libasound2-dev) at build time. Without it the
-# player runs video + live captions silently.
-cpal = { version = "0.15", optional = true }
+# Audio goes through a system helper resolved at runtime (pw-cat / paplay /
+# aplay), so the build needs no host audio dev headers.
+which.workspace = true
 crossbeam-channel.workspace = true
 rfd.workspace = true
 thiserror.workspace = true
@@ -39,9 +38,6 @@ i-slint-backend-testing = "1.18"
 
 [features]
 default = []
-# Sound output through the default ALSA/JACK device (cpal); requires the
-# host audio dev headers at build time.
-audio = ["dep:cpal"]
 # Forward the opt-in GPU backend for whisper; see sublayer-ai.
 vulkan = ["sublayer-ai/vulkan"]
 

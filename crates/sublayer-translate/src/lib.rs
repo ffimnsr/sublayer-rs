@@ -21,9 +21,13 @@ pub mod local;
 pub mod pairs;
 #[cfg(feature = "remote-translate")]
 pub mod remote;
+#[cfg(all(feature = "download", feature = "local-translate"))]
+pub mod translation_models;
 
 #[cfg(feature = "local-translate")]
 pub use pairs::{LOCAL_PAIRS, LocalPair, find_local_pair};
+#[cfg(all(feature = "download", feature = "local-translate"))]
+pub use translation_models::{PinnedBundle, PinnedFile, TranslationModelManager, pinned_bundle};
 
 /// A sentence-level translation backend.
 pub trait TranslationBackend {
@@ -93,12 +97,12 @@ pub enum TranslateError {
 
     /// The remote endpoint could not be reached or the request failed at the
     /// transport level.
-    #[cfg(feature = "remote-translate")]
+    #[cfg(any(feature = "remote-translate", feature = "download"))]
     #[error("translation request failed: {0}")]
     Http(#[from] reqwest::Error),
 
     /// The remote endpoint answered with a non-success status.
-    #[cfg(feature = "remote-translate")]
+    #[cfg(any(feature = "remote-translate", feature = "download"))]
     #[error("translation endpoint returned HTTP {status}: {detail}")]
     HttpStatus {
         /// HTTP status code received.
@@ -106,6 +110,10 @@ pub enum TranslateError {
         /// Bounded excerpt of the response body.
         detail: String,
     },
+
+    /// Filesystem interaction failed.
+    #[error("i/o error: {0}")]
+    Io(#[from] std::io::Error),
 
     /// The backend answered with something that is not a usable translation.
     #[error("translation backend returned an unexpected response: {0}")]

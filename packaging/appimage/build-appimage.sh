@@ -23,9 +23,9 @@ LINUXDEPLOY="${LINUXDEPLOY:-}"
 
 cd "$ROOT"
 
-if [ ! -x target/release/sublayer-ui ] || [ ! -x target/release/sublayer ]; then
+if [ ! -x target/release/sublayer-ui ] || [ ! -x target/release/sublayer ] || [ ! -x target/release/sublayer-player ]; then
     echo "building release binaries…"
-    cargo build --release -p sublayer-ui -p sublayer-cli
+    cargo build --release -p sublayer-ui -p sublayer-cli -p sublayer-player
 fi
 
 echo "assembling $APPDIR"
@@ -38,8 +38,11 @@ install -d \
 
 install -m755 target/release/sublayer-ui "$APPDIR/usr/bin/sublayer-ui"
 install -m755 target/release/sublayer "$APPDIR/usr/bin/sublayer"
+install -m755 target/release/sublayer-player "$APPDIR/usr/bin/sublayer-player"
 install -m644 packaging/sublayer.desktop "$APPDIR/usr/share/applications/com.vastorigins.Sublayer.desktop"
 install -m644 packaging/sublayer.desktop "$APPDIR/com.vastorigins.Sublayer.desktop"
+install -m644 packaging/sublayer-player.desktop "$APPDIR/usr/share/applications/com.vastorigins.Sublayer.Player.desktop"
+install -m644 packaging/sublayer-player.desktop "$APPDIR/com.vastorigins.Sublayer.Player.desktop"
 install -m644 assets/icons/hicolor/scalable/apps/com.vastorigins.Sublayer.svg \
     "$APPDIR/usr/share/icons/hicolor/scalable/apps/com.vastorigins.Sublayer.svg"
 cp assets/icons/hicolor/scalable/apps/com.vastorigins.Sublayer.svg "$APPDIR/com.vastorigins.Sublayer.svg"

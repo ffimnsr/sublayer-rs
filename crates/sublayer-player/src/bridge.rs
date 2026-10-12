@@ -6,6 +6,7 @@
 //! from the UI thread over an unbounded channel; events flow back to the UI
 //! pump over a crossbeam channel.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +15,7 @@ use crossbeam_channel::Sender;
 use sublayer_ai::{LiveCaptioner, LiveEvent, LiveTranscriberConfig, ModelManager};
 use sublayer_core::{SublayerPaths, VideoMetadata, WordToken};
 use sublayer_media::{PreviewConfig, RgbaFrame, decode_frame_at, probe_video};
-use sublayer_translate::find_local_pair;
+use sublayer_translate::{LocalPair, TranslationModelManager, find_local_pair};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::audio::{AudioCommand, AudioEvent, run_audio_driver};
@@ -203,35 +204,72 @@ struct TranslateState {
     pinned: Option<String>,
     worker: TranslateWorker,
     worker_events: UnboundedReceiver<TranslateEvent>,
+    manager: TranslationModelManager,
+    /// Pair prefixes whose bundles are verified on disk; re-ensuring them
+    /// (and re-hashing dozens of MB) is avoided on every toggle.
+    ensured: HashSet<String>,
 }
 
 impl TranslateState {
     fn new(models_root: PathBuf) -> Self {
-        let mut worker = TranslateWorker::new(models_root);
+        let mut worker = TranslateWorker::new(models_root.clone());
         let worker_events = worker.take_events();
+        let manager = TranslationModelManager::new(models_root)
+            .expect("constructing the translation model manager cannot fail");
         Self {
             enabled: false,
             detected: None,
             pinned: None,
             worker,
             worker_events,
+            manager,
+            ensured: HashSet::new(),
         }
     }
 
-    /// Recomputes the backend for the current source language:
-    /// pinned selection wins, otherwise whisper's detection; the bundled
-    /// pairs cover zh-CN/ja/ko/es/da/ru (whisper's `zh` maps to `zh-CN`).
-    fn sync_pair(&mut self) {
-        let pair = if !self.enabled {
-            None
-        } else {
-            self.pinned
-                .as_deref()
-                .or(self.detected.as_deref())
-                .map(|code| if code == "zh" { "zh-CN" } else { code })
-                .and_then(find_local_pair)
+    /// The bundled pair for the current source language: pinned selection
+    /// wins, otherwise whisper's detection; the pairs cover zh-CN/ja/ko/
+    /// es/da/ru (whisper's `zh` maps to `zh-CN`).
+    fn resolves_pair(&self) -> Option<LocalPair> {
+        if !self.enabled {
+            return None;
+        }
+        self.pinned
+            .as_deref()
+            .or(self.detected.as_deref())
+            .map(|code| if code == "zh" { "zh-CN" } else { code })
+            .and_then(find_local_pair)
+            .copied()
+    }
+
+    /// Downloads the pair bundle when needed, then swaps the worker backend;
+    /// failures surface in the status line and leave the previous backend
+    /// unloaded.
+    async fn apply_pair(&mut self, events: &Sender<PlayerEvent>) {
+        let Some(pair) = self.resolves_pair() else {
+            self.worker.set_pair(None);
+            return;
         };
-        self.worker.set_pair(pair.copied());
+        if !self.ensured.contains(pair.model_prefix) {
+            let _ = events.send(PlayerEvent::Status(format!(
+                "downloading the {} → English model…",
+                pair.display_name
+            )));
+            match self.manager.ensure_pair(&pair).await {
+                Ok(_) => {
+                    self.ensured.insert(pair.model_prefix.to_owned());
+                }
+                Err(error) => {
+                    let _ = events.send(PlayerEvent::Status(format!(
+                        "{} → English model unavailable: {error}",
+                        pair.display_name
+                    )));
+                    self.worker.set_pair(None);
+                    return;
+                }
+            }
+        }
+        self.worker.set_pair(Some(pair));
     }
 }
 
@@ -317,11 +355,11 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                     Command::Language(language) => {
                         pipeline.language = language.clone();
                         translate.pinned = language;
-                        translate.sync_pair();
+                        translate.apply_pair(&events).await;
                     }
                     Command::Translate(enabled) => {
                         translate.enabled = enabled;
-                        translate.sync_pair();
+                        translate.apply_pair(&events).await;
                     }
                     Command::TranslateSentence(sentence) => {
                         translate.worker.translate(vec![sentence]);
@@ -358,7 +396,7 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                         }
                         LiveEvent::LanguageDetected(language) => {
                             translate.detected = Some(language.clone());
-                            translate.sync_pair();
+                            translate.apply_pair(&events).await;
                             let _ = events.send(PlayerEvent::LanguageDetected(language));
                         }
                         LiveEvent::Error(error) => {

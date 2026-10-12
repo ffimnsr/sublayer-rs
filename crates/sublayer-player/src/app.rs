@@ -104,22 +104,17 @@ impl App {
         let session = self.session.clone();
         self.ui.on_play_toggled(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let mut guard = session.borrow_mut();
-            if guard.video.is_none() {
-                guard.status = "open a video first".to_owned();
-                ui.set_status(guard.status.clone().into());
-                return;
+            toggle_play(&ui, &bridge, &session);
+        });
+
+        let weak = self.ui.as_weak();
+        self.ui.on_escape_fullscreen(move || {
+            if let Some(ui) = weak.upgrade() {
+                let window = ui.window();
+                if window.is_fullscreen() {
+                    window.set_fullscreen(false);
+                }
             }
-            if guard.playing {
-                guard.playing = false;
-                bridge.pause();
-            } else {
-                let playhead = guard.playhead_ms;
-                guard.playing = true;
-                guard.last_bridge_seek_ms = playhead;
-                bridge.play_at(playhead);
-            }
-            refresh_playback(&ui, &session);
         });
 
         let weak = self.ui.as_weak();
@@ -315,7 +310,7 @@ fn handle_event(
         PlayerEvent::Status(status) => guard.status = status.clone(),
         PlayerEvent::Words(words) => {
             let sentences = guard.feed_words(words.clone());
-            let translate_on = guard.translate_enabled;
+            let translate_on = guard.translate_enabled && guard.translation_available();
             let playhead = guard.playhead_ms;
             guard.refresh_caption(playhead);
             if translate_on {
@@ -372,6 +367,26 @@ fn detected_label(session: &Session) -> String {
         ""
     };
     format!("detected: {display}{translating}")
+}
+
+/// Play/pause toggle shared by the transport button and the video click.
+fn toggle_play(ui: &PlayerWindow, bridge: &Bridge, session: &Rc<RefCell<Session>>) {
+    let mut guard = session.borrow_mut();
+    if guard.video.is_none() {
+        guard.status = "open a video first".to_owned();
+        ui.set_status(guard.status.clone().into());
+        return;
+    }
+    if guard.playing {
+        guard.playing = false;
+        bridge.pause();
+    } else {
+        let playhead = guard.playhead_ms;
+        guard.playing = true;
+        guard.last_bridge_seek_ms = playhead;
+        bridge.play_at(playhead);
+    }
+    refresh_playback(ui, session);
 }
 
 /// Seeks to `ms` (clamped), restarting the audio only when the movement is

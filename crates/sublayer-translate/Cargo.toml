@@ -23,6 +23,8 @@ fxtranslate = { version = "0.5", optional = true }
 reqwest = { workspace = true, features = ["blocking", "json"], optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+# Pinned bundle downloads (SHA-256 verification).
+sha2 = { workspace = true, optional = true }
 
 [features]
 default = ["remote-translate"]
@@ -31,6 +33,10 @@ default = ["remote-translate"]
 remote-translate = ["dep:reqwest", "dep:serde", "dep:serde_json"]
 # Offline NMT backend built on fxtranslate.
 local-translate = ["dep:fxtranslate"]
+# Automatic downloads of the bundled local pairs (pinned digests, discovery
+# through Mozilla Remote Settings). Implies the local backend: downloading
+# bundles only makes sense with `local-translate`.
+download = ["dep:reqwest", "dep:serde_json", "dep:sha2"]
 
 [dev-dependencies]
 tempfile.workspace = true

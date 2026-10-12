@@ -1,0 +1,64 @@
+# Flatpak manifest for the Sublayer live-caption player.
+#
+# Build with:
+#   flatpak-builder --user --install --force-clean build-dir \
+#       packaging/flatpak/com.vastorigins.Sublayer.Player.yml
+#
+# Notes:
+# * Whisper models and the translation bundles are downloaded at runtime
+#   (huggingface.co, Mozilla Remote Settings + CDN), so network is granted
+#   and every model is SHA-256 verified before use.
+# * Sound goes through the sandbox's PipeWire/PulseAudio sockets when the
+#   runtime provides a helper (`pw-cat`/`paplay`). The host's `/usr` is also
+#   mounted read-only (host-os) with its `bin` directory put first on
+#   `PATH`, so a host helper (alsa-utils/pulseaudio-utils/pipewire-utils)
+#   works as-is. Without any helper the player runs silently by design and
+#   the status line says so.
+# * `--device=dri` is unused: the player runs whisper on the CPU.
+
+id: com.vastorigins.Sublayer.Player
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: sublayer-player
+
+finish-args:
+  # Model and translation bundle downloads.
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # Audio sinks: PipeWire first, PulseAudio fallback.
+  - --socket=pipewire
+  - --socket=pulseaudio
+  - --filesystem=xdg-run/pipewire-0
+  # Host audio helpers (pw-cat/paplay/aplay) and their libraries, read-only.
+  - --filesystem=host-os
+  - --env=PATH=/run/host/usr/bin:/app/bin:/usr/bin
+  # Source videos, and native file dialogs (rfd speaks the XDG portal).
+  - --filesystem=xdg-videos
+  - --filesystem=xdg-download
+  - --talk-name=org.freedesktop.portal.Desktop
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/sublayer/cargo
+  build-args:
+    # Cargo needs the network to fetch the workspace dependencies.
+    - --share=network
+
+modules:
+  - name: sublayer-player
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --locked -p sublayer-player
+      - install -Dm755 target/release/sublayer-player /app/bin/sublayer-player
+      - install -Dm644 packaging/sublayer-player.desktop /app/share/applications/com.vastorigins.Sublayer.Player.desktop
+      - install -Dm644 packaging/metainfo/com.vastorigins.Sublayer.Player.metainfo.xml /app/share/metainfo/com.vastorigins.Sublayer.Player.metainfo.xml
+      - install -Dm644 assets/icons/hicolor/scalable/apps/com.vastorigins.Sublayer.svg /app/share/icons/hicolor/scalable/apps/com.vastorigins.Sublayer.svg
+    sources:
+      - type: dir
+        path: ../..

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.vastorigins.Sublayer.Player</id>
+  <name>Sublayer Player</name>
+  <summary>Media player with live captions and live translation to English</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <developer_name>Sublayer Contributors</developer_name>
+  <url type="homepage">https://github.com/sublayer-rs/sublayer</url>
+  <description>
+    <p>
+      Sublayer Player plays media with standard transport controls and
+      generates live captions on your machine with whisper.cpp. The spoken
+      language is auto-detected; a toggle translates the finalized caption
+      cards to English through bundled Firefox Translations models
+      (Chinese simplified, Japanese, Korean, Spanish, Danish, Russian).
+      Everything runs locally; the only network access is downloading the
+      chosen whisper model and the translation bundles on first use, both
+      verified against pinned SHA-256 digests.
+    </p>
+    <p>
+      Sound is optional by design: playback uses a system helper
+      (pw-cat, paplay, or aplay on PATH) and without one the video and
+      captions keep running silently.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.vastorigins.Sublayer.Player.desktop</launchable>
+  <provides>
+    <binary>sublayer-player</binary>
+  </provides>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Player</category>
+  </categories>
+  <keywords>
+    <keyword>captions</keyword>
+    <keyword>subtitles</keyword>
+    <keyword>transcription</keyword>
+    <keyword>whisper</keyword>
+    <keyword>translation</keyword>
+  </keywords>
+  <releases>
+    <release version="0.1.0" date="2026-10-13"/>
+  </releases>
+</component>

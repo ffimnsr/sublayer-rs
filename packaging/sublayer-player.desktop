@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Sublayer Player
+GenericName=Live Caption Player
+Comment=Media player with live captions and live translation to English
+Exec=sublayer-player %F
+Icon=com.vastorigins.Sublayer
+Terminal=false
+Categories=AudioVideo;Player;Audio;
+Keywords=captions;subtitles;video;transcription;whisper;translation;
+MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;audio/mpeg;audio/x-wav;
+StartupNotify=true
+StartupWMClass=com.vastorigins.Sublayer

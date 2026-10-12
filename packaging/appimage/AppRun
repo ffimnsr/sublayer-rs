@@ -19,4 +19,12 @@ export XDG_DATA_DIRS="$APPDIR/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/s
 : "${SLINT_BACKEND:=winit-femtovg}"
 export SLINT_BACKEND
 
+# `Sublayer.AppImage --player` runs the live-caption player binary instead
+# of the studio; the desktop entry installed by the bundler uses the plain
+# invocation (studio).
+if [ "${1:-}" = "--player" ]; then
+    shift
+    exec "$APPDIR/usr/bin/sublayer-player" "$@"
+fi
+
 exec "$APPDIR/usr/bin/sublayer-ui" "$@"

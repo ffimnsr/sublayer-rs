@@ -4,7 +4,7 @@ Local-first AI video caption studio for Linux. Sublayer transcribes your
 footage with Whisper, turns the word stream into punchy caption cards, and
 burns animated subtitles straight into a finished video — optionally on the
 GPU. Everything runs on your machine; the only network access is the one-time
-Whisper model download.
+Whisper model download and the on-demand translation bundle downloads.
 
 ```
 video ──▶ ffprobe ──▶ 16 kHz audio ──▶ Whisper (VAD + word timestamps)
@@ -157,7 +157,9 @@ automatically** on the first decoded seconds, and captions appear on the
 video in the recognized language.
 
 - **Transport** — Play/Pause, Stop, −5 s / +5 s, a seek slider, a volume
-  slider plus mute, and fullscreen.
+  slider plus mute, and fullscreen; keyboard shortcuts work throughout
+  (Space play/pause, ←/→ ±5 s, ↑/↓ volume, M mute, F fullscreen, Esc exits
+  fullscreen; clicking the video also toggles play).
 - **Auto-detect** — leave the language selector on *Auto-detect*; the header
   shows what whisper settled on (`detected: Korean`). Picking a language
   pins it for the whole session.
@@ -167,18 +169,31 @@ video in the recognized language.
   English card replaces the source caption. When the detected language has
   no bundled pair the toggle reports it and captions stay in the source
   language.
-- **Bundles** — the translation models are Firefox Translations bundles
-  placed in `$XDG_DATA_HOME/sublayer/translate/<prefix>/`
+- **Bundles** — the translation models (Firefox Translations bundles for
+  zh-CN · ja · ko · es · da · ru → en) are **downloaded automatically on
+  first use** and verified against pinned SHA-256 digests before being
+  renamed into place; URLs are discovered from Mozilla's Remote Settings by
+  matching the pinned digests, so upstream file moves never break a
+  download. Pre-fetch them without the window:
+
+  ```sh
+  sublayer-player download ko ja zh-cn
+  sublayer-player download all        # everything bundled
+  ```
+
+  Bundles land in `$XDG_DATA_HOME/sublayer/translate/<prefix>/`
   (`model.koen.intgemm.alphas.bin`, `lex.50.50.koen.s2t.bin`,
   `vocab.koen.spm`, …; zh-CN uses `srcvocab.zhen.spm` +
   `trgvocab.zhen.spm`).
-- **Audio output** is an opt-in build feature: `cpal` needs the host ALSA
-  headers at build time, so default builds play silently while the video and
-  captions run:
-
-  ```sh
-  cargo build --release -p sublayer-player --features audio
-  ```
+- **Audio output** needs no build-time audio libraries (no ALSA dev headers
+  required, whatever the distro): the player spawns the first available
+  system helper from `PATH` — `pw-cat` (PipeWire, from `pipewire-utils`),
+  `paplay` (PulseAudio, from `pulseaudio-utils`), or `aplay` (ALSA, from
+  `alsa-utils`, Fedora) — and streams raw PCM into it (48 kHz stereo
+  s16le). Helpers that exit immediately (no sound server behind them) are
+  skipped, and a helper that dies mid-play is dropped: playback continues
+  silently with captions running. No helper found means silent playback
+  (the status line says so).
 
 ## Hardware acceleration
 
@@ -231,7 +246,7 @@ flow; the UI and CLI are thin shells over the engine crates.
 | --- | --- |
 | `sublayer-core` | Domain models (`Project`, `CaptionSegment`, `WordToken`, `ThemeStyle`), XDG paths, errors |
 | `sublayer-media` | FFprobe wrapper, 16 kHz audio extraction, waveform decimation, frame preview, shared FFmpeg process layer |
-| `sublayer-player` | Slint live-caption player: transport, auto-detected language, translated captions, ffmpeg + (optional) cpal audio |
+| `sublayer-player` | Slint live-caption player: transport, auto-detected language, translated captions, ffmpeg + system audio helper (no audio dev headers needed) |
 | `sublayer-ai` | Model downloader with SHA-256 verification, VAD, Whisper transcription with word timestamps |
 | `sublayer-whisper` | Leak-free safe bindings to whisper.cpp over the raw `whisper-rs-sys` FFI; the only crate allowed `unsafe` |
 | `sublayer-subtitles` | Word clustering, ASS/SRT/VTT compilation, theme presets and JSON I/O, font directory resolution |
@@ -349,9 +364,10 @@ Phases 1–5 of the implementation roadmap are complete: workspace foundation,
 media pipeline, AI speech pipeline, subtitles and animation engine, the Slint
 studio, and hardware-accelerated export with packaging. Phase 6 (the
 live-caption player) is underway — the streaming audio decode, the live
-ASR driver, the translation backends, and the player window are in; the
-`audio` output feature still needs a host with the ALSA dev headers, and
-the Flatpak/AppImage packaging is not extended yet. Known gaps include
+ASR driver, the translation backends, and the player window are in, and
+playback audio goes through a system helper (`pw-cat`/`paplay`/`aplay`) with
+no build-time audio dependencies; the player has Flatpak and AppImage
+packaging (see `packaging/`). Known gaps include
 per-render quality settings in the UI (the CLI has `--quality`), audio during
 the studio playback preview, and AppStream metadata for Flathub.
 

@@ -12,6 +12,7 @@
 mod app;
 mod audio;
 mod bridge;
+mod cli;
 mod error;
 mod session;
 mod translate_worker;
@@ -23,6 +24,28 @@ use tracing_subscriber::EnvFilter;
 slint::include_modules!();
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.is_empty() {
+        // With arguments the binary acts as a CLI (model downloads); without
+        // them it is the player window.
+        std::process::exit(match args[0].as_str() {
+            "download" => match cli::run(&args[1..]) {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("error: {error}\n{}", cli::usage());
+                    1
+                }
+            },
+            "--help" | "-h" | "help" => {
+                println!("{}", cli::usage());
+                0
+            }
+            other => {
+                eprintln!("unknown subcommand `{other}`\n{}", cli::usage());
+                2
+            }
+        });
+    }
     init_tracing();
     match app::App::new().and_then(|app| app.run()) {
         Ok(()) => {}

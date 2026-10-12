@@ -34,9 +34,27 @@ export component PlayerWindow inherits Window {
     callback volume_changed(float);
     callback mute_toggled();
     callback fullscreen_toggled();
+    callback escape_fullscreen();
     callback translate_toggled(bool);
     callback model_selected(string);
     callback language_selected(string);
+
+    forward-focus: key-scope;
+    key-scope := FocusScope {
+        // Standard media-player shortcuts. Unhandled keys bubble up from
+        // focused controls, so these keep working after any button is
+        // clicked.
+        key-pressed(event) => {
+            if (event.text == Key.Space) { root.play_toggled(); accept }
+            else if (event.text == Key.LeftArrow) { root.seek_by(-5000); accept }
+            else if (event.text == Key.RightArrow) { root.seek_by(5000); accept }
+            else if (event.text == Key.UpArrow) { root.volume_changed(Math.min(100, root.volume + 10)); accept }
+            else if (event.text == Key.DownArrow) { root.volume_changed(Math.max(0, root.volume - 10)); accept }
+            else if (event.text == Key.M) { root.mute_toggled(); accept }
+            else if (event.text == Key.F) { root.fullscreen_toggled(); accept }
+            else if (event.text == Key.Escape) { root.escape_fullscreen(); accept }
+            else { reject }
+        }
 
     VerticalLayout {
         padding: 8px;
@@ -74,9 +92,13 @@ export component PlayerWindow inherits Window {
             }
         }
 
-        // Video area with the live caption overlay.
+        // Video area with the live caption overlay. Clicking the picture
+        // toggles play/pause like any self-respecting media player.
         Rectangle {
             background: black;
+            TouchArea {
+                clicked => { root.play_toggled(); }
+            }
             Image {
                 source: root.frame;
                 image-fit: contain;
@@ -162,5 +184,6 @@ export component PlayerWindow inherits Window {
                 clicked => { root.fullscreen_toggled(); }
             }
         }
+    }
     }
 }
