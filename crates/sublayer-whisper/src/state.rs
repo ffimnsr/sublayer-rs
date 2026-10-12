@@ -62,6 +62,29 @@ impl<'ctx> WhisperState<'ctx> {
         }
     }
 
+    /// Language whisper.cpp detected for the audio decoded so far.
+    ///
+    /// Only meaningful after at least one [`full`](Self::full) run with
+    /// `FullParams::set_language(None)` (auto-detect); returns `None` while
+    /// the detector has not settled, when detection failed, or when the
+    /// language was pinned explicitly.
+    pub fn detected_language(&self) -> Option<String> {
+        // Safety: `state` is a live owning pointer.
+        let id = unsafe { sys::whisper_full_lang_id_from_state(self.state) };
+        if id < 0 {
+            return None;
+        }
+        // Safety: whisper.cpp returns a static NUL-terminated string for a
+        // valid language id; the null check keeps malformed ids out of CStr.
+        let ptr = unsafe { sys::whisper_lang_str(id) };
+        if ptr.is_null() {
+            return None;
+        }
+        // Safety: guaranteed NUL-terminated by whisper.cpp (see above).
+        let code = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_str().ok()?;
+        (!code.is_empty()).then(|| code.to_owned())
+    }
+
     /// Number of decoded text segments.
     pub fn n_segments(&self) -> i32 {
         // Safety: `state` is a live owning pointer.

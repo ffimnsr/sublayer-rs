@@ -99,6 +99,13 @@ trait Decoder {
     /// Transcribes `samples` (16 kHz mono) whose first sample sits at
     /// `offset_ms` on the media timeline.
     fn decode(&mut self, samples: &[f32], offset_ms: u64) -> Result<Vec<WordToken>, AiError>;
+
+    /// Language whisper detected for the decoded audio, when auto-detection
+    /// is on (`language: None`); `None` for pinned-language decoders and for
+    /// decoders that never ran. Clears once read.
+    fn take_detected_language(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// [`Decoder`] backed by a whisper.cpp context.
@@ -106,6 +113,7 @@ struct WhisperDecoder {
     context: WhisperContext,
     language: Option<String>,
     threads: usize,
+    detected: Option<String>,
 }
 
 impl WhisperDecoder {
@@ -117,6 +125,7 @@ impl WhisperDecoder {
             context,
             language: config.language.clone(),
             threads: config.threads,
+            detected: None,
         })
     }
 }
@@ -126,9 +135,18 @@ impl Decoder for WhisperDecoder {
         let mut params = make_params(self.language.as_deref(), self.threads);
         let mut state = self.context.create_state()?;
         state.full(&mut params, samples)?;
+        if self.language.is_none() && self.detected.is_none() {
+            // whisper.cpp runs its language detector when no language was
+            // pinned; surface the first settled result.
+            self.detected = state.detected_language();
+        }
         let mut words = Vec::new();
         append_words(&state, &mut words, offset_ms);
         Ok(words)
+    }
+
+    fn take_detected_language(&mut self) -> Option<String> {
+        self.detected.take()
     }
 }
 
@@ -257,6 +275,13 @@ impl LiveTranscriber {
         self.media_offset_ms + samples_ms(self.buffer.len())
     }
 
+    /// Language whisper detected for the decoded audio (auto-detect mode
+    /// only); `None` when detection has not settled or the language was
+    /// pinned. Clears once read.
+    pub fn take_detected_language(&mut self) -> Option<String> {
+        self.decoder.take_detected_language()
+    }
+
     fn window_samples(&self) -> usize {
         (u64::from(WHISPER_SAMPLE_RATE) * self.config.window_ms / 1_000) as usize
     }
@@ -363,6 +388,9 @@ enum Command {
 pub enum LiveEvent {
     /// A decode finished; the words carry media-timeline timestamps.
     Words(Vec<WordToken>),
+    /// Whisper settled on a spoken language (auto-detect mode). Emitted at
+    /// most once per session; the code is whisper's (`"ko"`, `"zh"`, ...).
+    LanguageDetected(String),
     /// A window failed to decode; the pipeline continues with the next one.
     /// The failed audio is dropped.
     Error(AiError),
@@ -463,7 +491,14 @@ fn run_worker(
             return;
         }
     };
+    let mut reported_language = false;
     while let Ok(command) = commands.recv() {
+        if !reported_language {
+            if let Some(language) = transcriber.take_detected_language() {
+                reported_language = true;
+                let _ = events.send(LiveEvent::LanguageDetected(language));
+            }
+        }
         let result = match command {
             Command::Push(samples) => transcriber.push(&samples),
             Command::Flush => transcriber.flush(),
@@ -681,6 +716,50 @@ mod tests {
     }
 
     #[test]
+    fn detected_language_is_reported_once_and_clears() {
+        struct DetectingDecoder {
+            detected: Option<String>,
+        }
+        impl Decoder for DetectingDecoder {
+            fn decode(
+                &mut self,
+                _samples: &[f32],
+                _offset_ms: u64,
+            ) -> Result<Vec<WordToken>, AiError> {
+                Ok(Vec::new())
+            }
+            fn take_detected_language(&mut self) -> Option<String> {
+                self.detected.take()
+            }
+        }
+        let mut config = config();
+        config.enable_vad = false;
+        let mut transcriber = LiveTranscriber::with_decoder(
+            config,
+            Box::new(DetectingDecoder {
+                detected: Some("ko".to_owned()),
+            }),
+        );
+        transcriber.push(&tone(0.1, 1_000)).unwrap();
+        assert_eq!(transcriber.take_detected_language().as_deref(), Some("ko"));
+        assert_eq!(
+            transcriber.take_detected_language(),
+            None,
+            "clears once read"
+        );
+    }
+
+    #[test]
+    fn pinned_language_decoders_report_no_detection() {
+        let mut config = config();
+        config.enable_vad = false;
+        config.language = Some("ko".to_owned());
+        let mut transcriber = live(config);
+        transcriber.push(&tone(0.1, 2_000)).unwrap();
+        assert_eq!(transcriber.take_detected_language(), None);
+    }
+
+    #[test]
     fn decoder_errors_propagate_from_push() {
         struct FailingDecoder;
         impl Decoder for FailingDecoder {
@@ -754,6 +833,9 @@ mod tests {
                     for word in &words {
                         assert!(word.end_ms >= word.start_ms);
                     }
+                }
+                LiveEvent::LanguageDetected(language) => {
+                    eprintln!("detected language: {language}");
                 }
                 LiveEvent::Error(error) => panic!("unexpected live error: {error}"),
             }

@@ -99,16 +99,33 @@ pub struct AudioPcmStream {
     carry: Vec<u8>,
 }
 
-/// Spawns ffmpeg decoding the first audio stream of `input` to raw 16 kHz
-/// mono 16-bit little-endian PCM on stdout.
-pub async fn stream_audio_16k(input: &Path) -> Result<AudioPcmStream, MediaError> {
+/// Spawns ffmpeg decoding the first audio stream of `input` to raw
+/// little-endian 16-bit PCM on stdout.
+///
+/// `offset_ms` seeks before the input is opened (fast input seeking; the
+/// cut may land a few samples early, which live captions tolerate).
+pub async fn stream_pcm_s16le(
+    input: &Path,
+    offset_ms: Option<u64>,
+    sample_rate: u32,
+    channels: u16,
+) -> Result<AudioPcmStream, MediaError> {
     let program = ffmpeg::resolve(ffmpeg::FFMPEG, ffmpeg::FFMPEG_ENV)?;
     let mut command = ffmpeg::command(&program);
+    command.args(["-hide_banner", "-nostdin", "-loglevel", "error"]);
+    if let Some(offset_ms) = offset_ms {
+        // ffmpeg's `-ss` counts seconds; fractional offsets keep millisecond
+        // seeks accurate (100 ms -> "0.100").
+        let seconds = format!("{:.3}", offset_ms as f64 / 1_000.0);
+        command.arg("-ss").arg(seconds);
+    }
     command
-        .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-i"])
+        .arg("-i")
         .arg(input)
-        .args(["-map", "0:a:0", "-vn", "-ac", "1", "-ar"])
-        .arg(WHISPER_SAMPLE_RATE.to_string())
+        .args(["-map", "0:a:0", "-vn", "-ac"])
+        .arg(channels.to_string())
+        .args(["-ar"])
+        .arg(sample_rate.to_string())
         .args(["-c:a", "pcm_s16le", "-f", "s16le", "pipe:1"]);
 
     tracing::debug!(command = %ffmpeg::describe(&command), "streaming media audio");
@@ -135,6 +152,12 @@ pub async fn stream_audio_16k(input: &Path) -> Result<AudioPcmStream, MediaError
         pending_pos: 0,
         carry: Vec::new(),
     })
+}
+
+/// Spawns ffmpeg decoding the first audio stream of `input` to raw 16 kHz
+/// mono 16-bit little-endian PCM on stdout.
+pub async fn stream_audio_16k(input: &Path) -> Result<AudioPcmStream, MediaError> {
+    stream_pcm_s16le(input, None, WHISPER_SAMPLE_RATE, 1).await
 }
 
 impl AudioPcmStream {
@@ -483,6 +506,47 @@ mod tests {
         assert!(
             matches!(error, MediaError::NoAudioStream(_)),
             "got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_honors_a_start_offset() {
+        if !crate::test_util::ffmpeg_available() {
+            eprintln!("skipping: ffmpeg is not available");
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.wav");
+        write_tone_wav(&source, 48_000, 2, 0.25);
+
+        let mut full_stream = stream_audio_16k(&source).await.unwrap();
+        let full = read_all(&mut full_stream).await;
+        full_stream.finish().await.unwrap();
+
+        let mut offset_stream = stream_pcm_s16le(&source, Some(100), WHISPER_SAMPLE_RATE, 1)
+            .await
+            .unwrap();
+        let offset = read_all(&mut offset_stream).await;
+        offset_stream.finish().await.unwrap();
+
+        // 100 ms at 16 kHz = 1600 samples; input seeking may cut a few
+        // samples early, so allow slack on both ends.
+        let expected = 4_000 - 1_600;
+        assert!(
+            (offset.len() as i64 - expected).abs() <= 200,
+            "expected ~{expected} samples after 100 ms, got {}",
+            offset.len()
+        );
+        assert!(
+            offset.iter().any(|sample| sample.abs() > 0.7),
+            "the offset stream must carry the tone"
+        );
+        // The seek must have jumped: the offset stream starts at a different
+        // phase of the sine than the unseeked stream.
+        assert_ne!(
+            &offset[..400],
+            &full[..400],
+            "offset stream must not start at the media beginning"
         );
     }
 

@@ -1,0 +1,166 @@
+import { Button, CheckBox, ComboBox, HorizontalBox, Slider, VerticalBox } from "std-widgets.slint";
+
+export component PlayerWindow inherits Window {
+    title: "Sublayer Player";
+    preferred-width: 1100px;
+    preferred-height: 720px;
+
+    in property <string> file_title: "sublayer-player — no video open";
+    in property <string> status: "";
+    in property <string> time_label: "0:00 / 0:00";
+    in property <string> caption_text: "";
+    in property <string> detected_label: "";
+
+    in property <bool> playing: false;
+    in property <bool> can_seek: false;
+    in property <bool> muted: false;
+    in property <bool> translate_enabled: false;
+
+    in property <int> playhead_ms: 0;
+    in property <int> duration_ms: 0;
+    in property <float> volume: 100;
+    in property <image> frame;
+
+    in property <[string]> models: [];
+    in property <[string]> languages: [];
+    in property <int> model_index: 0;
+    in property <int> language_index: 0;
+
+    callback open_clicked();
+    callback play_toggled();
+    callback stop_clicked();
+    callback seek_by(int);
+    callback seek(int);
+    callback volume_changed(float);
+    callback mute_toggled();
+    callback fullscreen_toggled();
+    callback translate_toggled(bool);
+    callback model_selected(string);
+    callback language_selected(string);
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: root.file_title;
+                font-size: 15px;
+                vertical-alignment: center;
+            }
+            Rectangle { width: 4px; }
+            Button { text: "Open…"; clicked => { root.open_clicked(); } }
+            ComboBox {
+                model: root.models;
+                current-index: root.model_index;
+                selected(text) => { root.model_selected(text); }
+            }
+            ComboBox {
+                model: root.languages;
+                current-index: root.language_index;
+                selected(text) => { root.language_selected(text); }
+            }
+            CheckBox {
+                text: "Translate to English";
+                checked: root.translate_enabled;
+                toggled() => { root.translate_toggled(self.checked); }
+            }
+            Text {
+                text: root.detected_label;
+                font-size: 13px;
+                color: #9ca3af;
+                vertical-alignment: center;
+            }
+        }
+
+        // Video area with the live caption overlay.
+        Rectangle {
+            background: black;
+            Image {
+                source: root.frame;
+                image-fit: contain;
+                width: 100%;
+                height: 100%;
+            }
+            Rectangle {
+                visible: root.caption_text != "";
+                x: 24px;
+                width: parent.width - 48px;
+                y: parent.height - 96px;
+                height: 68px;
+                background: rgba(0, 0, 0, 170);
+                border-radius: 10px;
+                Text {
+                    text: root.caption_text;
+                    x: 12px;
+                    width: parent.width - 24px;
+                    height: parent.height;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                    font-size: 24px;
+                    font-weight: 600;
+                    color: white;
+                }
+            }
+        }
+
+        Text {
+            text: root.status;
+            font-size: 12px;
+            color: #9ca3af;
+            height: 16px;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Button {
+                text: "−5 s";
+                enabled: root.can_seek;
+                clicked => { root.seek_by(-5000); }
+            }
+            Button {
+                text: root.playing ? "⏸ Pause" : "⏵ Play";
+                enabled: root.can_seek;
+                clicked => { root.play_toggled(); }
+            }
+            Button {
+                text: "⏹ Stop";
+                enabled: root.can_seek;
+                clicked => { root.stop_clicked(); }
+            }
+            Button {
+                text: "+5 s";
+                enabled: root.can_seek;
+                clicked => { root.seek_by(5000); }
+            }
+            Slider {
+                minimum: 0;
+                maximum: root.duration_ms;
+                value: Math.min(root.playhead_ms, root.duration_ms);
+                enabled: root.can_seek;
+                changed(value) => { root.seek(value); }
+            }
+            Text {
+                text: root.time_label;
+                vertical-alignment: center;
+            }
+            Button {
+                text: root.muted ? "🔇" : "🔊";
+                clicked => { root.mute_toggled(); }
+            }
+            Slider {
+                minimum: 0;
+                maximum: 100;
+                value: root.volume;
+                width: 120px;
+                changed(value) => { root.volume_changed(value); }
+            }
+            Button {
+                text: "⛶";
+                clicked => { root.fullscreen_toggled(); }
+            }
+        }
+    }
+}

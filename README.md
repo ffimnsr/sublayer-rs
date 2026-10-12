@@ -78,8 +78,12 @@ git clone https://github.com/sublayer-rs/sublayer
 cd sublayer
 cargo build --release
 
+```sh
 # Desktop studio
 ./target/release/sublayer-ui
+
+# Live-caption player
+./target/release/sublayer-player
 
 # Headless CLI
 ./target/release/sublayer --help
@@ -145,6 +149,37 @@ backend that fails at startup is retried down the chain and the CLI prints
 the fallback. Cards wider than the frame are scaled down automatically to
 fit the video width.
 
+## Live caption player
+
+`sublayer-player` plays a video with **live captions**: whisper transcribes
+as the media plays (rolling windows, VAD-gated), the **language is detected
+automatically** on the first decoded seconds, and captions appear on the
+video in the recognized language.
+
+- **Transport** — Play/Pause, Stop, −5 s / +5 s, a seek slider, a volume
+  slider plus mute, and fullscreen.
+- **Auto-detect** — leave the language selector on *Auto-detect*; the header
+  shows what whisper settled on (`detected: Korean`). Picking a language
+  pins it for the whole session.
+- **Translate to English** — the checkbox turns on live translation: each
+  finalized caption card is translated by the bundled local engine
+  (zh-CN · ja · ko · es · da · ru → en, see `sublayer-translate`), and the
+  English card replaces the source caption. When the detected language has
+  no bundled pair the toggle reports it and captions stay in the source
+  language.
+- **Bundles** — the translation models are Firefox Translations bundles
+  placed in `$XDG_DATA_HOME/sublayer/translate/<prefix>/`
+  (`model.koen.intgemm.alphas.bin`, `lex.50.50.koen.s2t.bin`,
+  `vocab.koen.spm`, …; zh-CN uses `srcvocab.zhen.spm` +
+  `trgvocab.zhen.spm`).
+- **Audio output** is an opt-in build feature: `cpal` needs the host ALSA
+  headers at build time, so default builds play silently while the video and
+  captions run:
+
+  ```sh
+  cargo build --release -p sublayer-player --features audio
+  ```
+
 ## Hardware acceleration
 
 - **VA-API** (Intel/AMD) is used when a `/dev/dri/renderD*` node exists *and*
@@ -196,6 +231,7 @@ flow; the UI and CLI are thin shells over the engine crates.
 | --- | --- |
 | `sublayer-core` | Domain models (`Project`, `CaptionSegment`, `WordToken`, `ThemeStyle`), XDG paths, errors |
 | `sublayer-media` | FFprobe wrapper, 16 kHz audio extraction, waveform decimation, frame preview, shared FFmpeg process layer |
+| `sublayer-player` | Slint live-caption player: transport, auto-detected language, translated captions, ffmpeg + (optional) cpal audio |
 | `sublayer-ai` | Model downloader with SHA-256 verification, VAD, Whisper transcription with word timestamps |
 | `sublayer-whisper` | Leak-free safe bindings to whisper.cpp over the raw `whisper-rs-sys` FFI; the only crate allowed `unsafe` |
 | `sublayer-subtitles` | Word clustering, ASS/SRT/VTT compilation, theme presets and JSON I/O, font directory resolution |
@@ -312,10 +348,12 @@ entry, icon, bundled fonts, `AppRun`), optionally bundles host libraries with
 Phases 1–5 of the implementation roadmap are complete: workspace foundation,
 media pipeline, AI speech pipeline, subtitles and animation engine, the Slint
 studio, and hardware-accelerated export with packaging. Phase 6 (the
-live-caption player) is underway — the streaming audio decode and the live
-ASR driver are in. Known gaps include
+live-caption player) is underway — the streaming audio decode, the live
+ASR driver, the translation backends, and the player window are in; the
+`audio` output feature still needs a host with the ALSA dev headers, and
+the Flatpak/AppImage packaging is not extended yet. Known gaps include
 per-render quality settings in the UI (the CLI has `--quality`), audio during
-the playback preview, and AppStream metadata for Flathub.
+the studio playback preview, and AppStream metadata for Flathub.
 
 ## License
 

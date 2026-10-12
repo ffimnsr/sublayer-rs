@@ -1,0 +1,49 @@
+[package]
+name = "sublayer-player"
+description = "Slint live-caption media player with automatic language detection and live translation"
+version.workspace = true
+edition.workspace = true
+# Slint 1.18 requires a newer toolchain than the rest of the workspace.
+rust-version = "1.92"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "sublayer-player"
+path = "src/main.rs"
+
+[dependencies]
+sublayer-core.workspace = true
+sublayer-media.workspace = true
+sublayer-ai.workspace = true
+sublayer-translate = { workspace = true, features = ["local-translate"] }
+slint.workspace = true
+# Audio output (ALSA/JACK via cpal) is opt-in: like `encode_vulkan`, it
+# needs host dev libraries (libasound2-dev) at build time. Without it the
+# player runs video + live captions silently.
+cpal = { version = "0.15", optional = true }
+crossbeam-channel.workspace = true
+rfd.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true
+
+[dev-dependencies]
+# Headless platform for instantiating the window in tests.
+i-slint-backend-testing = "1.18"
+
+[features]
+default = []
+# Sound output through the default ALSA/JACK device (cpal); requires the
+# host audio dev headers at build time.
+audio = ["dep:cpal"]
+# Forward the opt-in GPU backend for whisper; see sublayer-ai.
+vulkan = ["sublayer-ai/vulkan"]
+
+[lints]
+workspace = true
