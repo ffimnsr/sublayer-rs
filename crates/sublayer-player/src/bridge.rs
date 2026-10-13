@@ -9,17 +9,17 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use crossbeam_channel::Sender;
 use sublayer_ai::{LiveCaptioner, LiveEvent, LiveTranscriberConfig, ModelManager};
 use sublayer_core::{SublayerPaths, VideoMetadata, WordToken};
-use sublayer_media::{PreviewConfig, RgbaFrame, decode_frame_at, probe_video};
+use sublayer_media::{RgbaFrame, probe_video};
 use sublayer_translate::{LocalPair, TranslationModelManager, find_local_pair};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::audio::{AudioCommand, AudioEvent, run_audio_driver};
 use crate::translate_worker::{TranslateEvent, TranslateWorker};
+use crate::video::{VideoCommand, VideoEvent, run_video_driver};
 
 /// Caption window: longer lag, more reliable decodes.
 const ASR_WINDOW_MS: u64 = 4_000;
@@ -37,8 +37,13 @@ pub enum PlayerEvent {
     LanguageDetected(String),
     /// A finalized sentence was translated to English.
     Translated(Vec<String>),
-    /// A decoded video frame.
-    Frame(RgbaFrame),
+    /// A decoded video frame for the current playhead.
+    Frame {
+        /// Media-timeline position of the frame in milliseconds.
+        pts_ms: u64,
+        /// The frame pixels.
+        frame: RgbaFrame,
+    },
     /// Playback reached the end of the media.
     PlaybackEnded,
 }
@@ -137,7 +142,8 @@ impl Bridge {
         self.send(Command::TranslateSentence(sentence));
     }
 
-    /// Decodes one frame at `timestamp_ms`; the result arrives as a `Frame`.
+    /// Advances the video decoder to `timestamp_ms`, emitting the frame that
+    /// is due there; the result arrives as a `Frame`.
     pub fn request_frame(&self, timestamp_ms: u64) {
         self.send(Command::Frame(timestamp_ms));
     }
@@ -166,6 +172,31 @@ enum Command {
     Translate(bool),
     TranslateSentence(String),
     Frame(u64),
+}
+
+/// Player handles: the audio driver and the video driver.
+#[derive(Default)]
+struct Drivers {
+    audio_tx: Option<UnboundedSender<AudioCommand>>,
+    audio_events: Option<UnboundedReceiver<AudioEvent>>,
+    video_tx: Option<UnboundedSender<VideoCommand>>,
+    video_events: Option<UnboundedReceiver<VideoEvent>>,
+}
+
+impl Drivers {
+    /// Stops the audio driver (its `Stop` handling exits the select loop).
+    fn stop_audio(&mut self) {
+        if let Some(tx) = self.audio_tx.take() {
+            let _ = tx.send(AudioCommand::Stop);
+        }
+    }
+
+    /// Stops the video driver (its `Stop` handling exits the select loop).
+    fn stop_video(&mut self) {
+        if let Some(tx) = self.video_tx.take() {
+            let _ = tx.send(VideoCommand::Stop);
+        }
+    }
 }
 
 /// The whisper caption pipeline for the current model/language, plus the
@@ -282,8 +313,7 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
     let mut video: Option<(PathBuf, VideoInfo)> = None;
     let mut pipeline = CaptionPipeline::new();
     let mut translate = TranslateState::new(translate_root);
-    let mut audio_tx: Option<UnboundedSender<AudioCommand>> = None;
-    let mut audio_events: Option<UnboundedReceiver<AudioEvent>> = None;
+    let mut drivers = Drivers::default();
 
     loop {
         tokio::select! {
@@ -304,9 +334,8 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                         let started = ensure_and_start(
                             &mut pipeline,
                             &model_manager,
-                            &mut audio_tx,
-                            &mut audio_events,
-                            video.as_ref().map(|(path, _)| path.clone()),
+                            &mut drivers,
+                            video.as_ref().map(|(path, info)| (path.clone(), info.metadata.clone())),
                             offset_ms,
                             &events,
                         )
@@ -316,36 +345,40 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                         }
                     }
                     Command::Pause | Command::Stop => {
-                        stop_audio(&mut audio_tx);
+                        drivers.stop_audio();
+                        drivers.stop_video();
                         let _ = events.send(PlayerEvent::Status("paused".to_owned()));
                     }
                     Command::Seek(offset_ms) => {
-                        if let Some(tx) = &audio_tx {
+                        if let Some(tx) = &drivers.audio_tx {
                             // The driver restarts its decoders and resets the
                             // captioner timeline to the new offset.
                             let _ = tx.send(AudioCommand::Start { offset_ms });
                         }
+                        if let Some(tx) = &drivers.video_tx {
+                            let _ = tx.send(VideoCommand::Start { offset_ms });
+                        }
                     }
                     Command::Restart(offset_ms) => {
-                        stop_audio(&mut audio_tx);
+                        drivers.stop_audio();
+                        drivers.stop_video();
                         ensure_and_start(
                             &mut pipeline,
                             &model_manager,
-                            &mut audio_tx,
-                            &mut audio_events,
-                            video.as_ref().map(|(path, _)| path.clone()),
+                            &mut drivers,
+                            video.as_ref().map(|(path, info)| (path.clone(), info.metadata.clone())),
                             offset_ms,
                             &events,
                         )
                         .await;
                     }
                     Command::Volume(percent) => {
-                        if let Some(tx) = &audio_tx {
+                        if let Some(tx) = &drivers.audio_tx {
                             let _ = tx.send(AudioCommand::SetVolume(percent));
                         }
                     }
                     Command::Mute(muted) => {
-                        if let Some(tx) = &audio_tx {
+                        if let Some(tx) = &drivers.audio_tx {
                             let _ = tx.send(AudioCommand::SetMute(muted));
                         }
                     }
@@ -365,24 +398,9 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                         translate.worker.translate(vec![sentence]);
                     }
                     Command::Frame(timestamp_ms) => {
-                        if let Some((path, info)) = &video {
-                            let path = path.clone();
-                            let metadata = info.metadata.clone();
-                            let events = events.clone();
-                            tokio::spawn(async move {
-                                let frame = tokio::time::timeout(
-                                    Duration::from_secs(10),
-                                    decode_frame_at(
-                                        &path,
-                                        Duration::from_millis(timestamp_ms),
-                                        &metadata,
-                                        &PreviewConfig::default(),
-                                    ),
-                                )
-                                .await;
-                                if let Ok(Ok(frame)) = frame {
-                                    let _ = events.send(PlayerEvent::Frame(frame));
-                                }
+                        if let Some(tx) = &drivers.video_tx {
+                            let _ = tx.send(VideoCommand::Advance {
+                                playhead_ms: timestamp_ms,
                             });
                         }
                     }
@@ -405,11 +423,26 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                     }
                 }
             }
-            event = next_audio_event(&mut audio_events) => {
+            event = next_video_event(&mut drivers.video_events) => {
+                if let Some(event) = event {
+                    match event {
+                        VideoEvent::Frame(decoded) => {
+                            let _ = events.send(PlayerEvent::Frame {
+                                pts_ms: decoded.timestamp_ms,
+                                frame: decoded.frame,
+                            });
+                        }
+                        VideoEvent::Log(message) => {
+                            let _ = events.send(PlayerEvent::Status(message));
+                        }
+                    }
+                }
+            }
+            event = next_audio_event(&mut drivers.audio_events) => {
                 if let Some(event) = event {
                     match event {
                         AudioEvent::Ended => {
-                            stop_audio(&mut audio_tx);
+                            drivers.stop_audio();
                             let _ = events.send(PlayerEvent::PlaybackEnded);
                         }
                         AudioEvent::Log(message) => {
@@ -435,38 +468,68 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
 }
 
 /// Select arm for the captioner event stream; parks when unset.
+///
+/// A closed channel (`None`) parks the arm for good — the sender was
+/// dropped, so no event can ever arrive — instead of spinning the select.
 async fn next_captioner_event(
     receiver: &mut Option<UnboundedReceiver<LiveEvent>>,
 ) -> Option<LiveEvent> {
     match receiver {
-        Some(receiver) => receiver.recv().await,
+        Some(rx) => {
+            let event = rx.recv().await;
+            if event.is_none() {
+                *receiver = None;
+            }
+            event
+        }
         None => std::future::pending().await,
     }
 }
 
-/// Select arm for the audio driver event stream; parks when unset.
+/// Select arm for the video driver event stream; parks when unset or closed.
+async fn next_video_event(
+    receiver: &mut Option<UnboundedReceiver<VideoEvent>>,
+) -> Option<VideoEvent> {
+    match receiver {
+        Some(rx) => {
+            let event = rx.recv().await;
+            if event.is_none() {
+                *receiver = None;
+            }
+            event
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Select arm for the audio driver event stream; parks when unset or closed.
 async fn next_audio_event(
     receiver: &mut Option<UnboundedReceiver<AudioEvent>>,
 ) -> Option<AudioEvent> {
     match receiver {
-        Some(receiver) => receiver.recv().await,
+        Some(rx) => {
+            let event = rx.recv().await;
+            if event.is_none() {
+                *receiver = None;
+            }
+            event
+        }
         None => std::future::pending().await,
     }
 }
 
 /// Rebuilds the captioner when the model/language changed, then starts (or
-/// restarts) the audio driver at `offset_ms`. `video` is `None` after a
-/// failed open; returns whether playback started.
+/// restarts) the audio and video drivers at `offset_ms`. `video` is `None`
+/// after a failed open; returns whether playback started.
 async fn ensure_and_start(
     pipeline: &mut CaptionPipeline,
     model_manager: &ModelManager,
-    audio_tx: &mut Option<UnboundedSender<AudioCommand>>,
-    audio_events: &mut Option<UnboundedReceiver<AudioEvent>>,
-    video: Option<PathBuf>,
+    drivers: &mut Drivers,
+    video: Option<(PathBuf, VideoMetadata)>,
     offset_ms: u64,
     events: &Sender<PlayerEvent>,
 ) -> bool {
-    let Some(video) = video else {
+    let Some((video, metadata)) = video else {
         let _ = events.send(PlayerEvent::Status("open a video first".to_owned()));
         return false;
     };
@@ -487,19 +550,24 @@ async fn ensure_and_start(
     }
     let captioner = pipeline.captioner.clone().expect("pipeline just built");
     let (events_tx, events_rx) = mpsc::unbounded_channel();
-    *audio_events = Some(events_rx);
+    drivers.audio_events = Some(events_rx);
     let (command_tx, command_rx) = mpsc::unbounded_channel();
-    tokio::spawn(run_audio_driver(video, captioner, command_rx, events_tx));
+    tokio::spawn(run_audio_driver(
+        video.clone(),
+        captioner,
+        command_rx,
+        events_tx,
+    ));
     let _ = command_tx.send(AudioCommand::Start { offset_ms });
-    *audio_tx = Some(command_tx);
-    true
-}
+    drivers.audio_tx = Some(command_tx);
 
-/// Stops the audio driver (its `Stop` handling exits the select loop).
-fn stop_audio(audio_tx: &mut Option<UnboundedSender<AudioCommand>>) {
-    if let Some(tx) = audio_tx.take() {
-        let _ = tx.send(AudioCommand::Stop);
-    }
+    let (events_tx, events_rx) = mpsc::unbounded_channel();
+    drivers.video_events = Some(events_rx);
+    let (command_tx, command_rx) = mpsc::unbounded_channel();
+    tokio::spawn(run_video_driver(video, metadata, command_rx, events_tx));
+    let _ = command_tx.send(VideoCommand::Start { offset_ms });
+    drivers.video_tx = Some(command_tx);
+    true
 }
 
 async fn open(video: &mut Option<(PathBuf, VideoInfo)>, path: &Path, events: &Sender<PlayerEvent>) {

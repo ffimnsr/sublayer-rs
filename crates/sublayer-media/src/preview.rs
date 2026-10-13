@@ -123,7 +123,11 @@ pub async fn decode_frame_at(
 
 /// Maps the FFmpeg "stream not found" trailer onto [`MediaError::NoVideoStream`]
 /// and keeps everything else as [`MediaError::CommandFailed`].
-fn classify_failure(input: &Path, status: std::process::ExitStatus, stderr: &[u8]) -> MediaError {
+pub(crate) fn classify_failure(
+    input: &Path,
+    status: std::process::ExitStatus,
+    stderr: &[u8],
+) -> MediaError {
     let message = String::from_utf8_lossy(stderr);
     if message.contains("matches no streams") || message.contains("does not contain any stream") {
         return MediaError::NoVideoStream(input.to_path_buf());
@@ -136,7 +140,7 @@ fn classify_failure(input: &Path, status: std::process::ExitStatus, stderr: &[u8
 /// Both edges are forced to even pixel counts (some encoders emit odd
 /// dimensions for odd inputs, and RGBA scaling keeps the aspect ratio closest
 /// when the result is even) and never drop below 2 pixels.
-fn scaled_dimensions(width: u32, height: u32, max_dimension: u32) -> (u32, u32) {
+pub(crate) fn scaled_dimensions(width: u32, height: u32, max_dimension: u32) -> (u32, u32) {
     let longest = width.max(height);
     if max_dimension == 0 || longest <= max_dimension {
         return (even(width), even(height));

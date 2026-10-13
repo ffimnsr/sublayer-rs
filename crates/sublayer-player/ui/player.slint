@@ -41,6 +41,10 @@ export component PlayerWindow inherits Window {
 
     forward-focus: key-scope;
     key-scope := FocusScope {
+        // Fill the window so the layout inside behaves like a root layout;
+        // a plain item would otherwise shrink to its preferred size.
+        width: 100%;
+        height: 100%;
         // Standard media-player shortcuts. Unhandled keys bubble up from
         // focused controls, so these keep working after any button is
         // clicked.
@@ -96,6 +100,8 @@ export component PlayerWindow inherits Window {
         // toggles play/pause like any self-respecting media player.
         Rectangle {
             background: black;
+            vertical-stretch: 1;
+            min-height: 240px;
             TouchArea {
                 clicked => { root.play_toggled(); }
             }
@@ -137,23 +143,30 @@ export component PlayerWindow inherits Window {
 
         HorizontalLayout {
             spacing: 8px;
+            // Icon-only transport; every button is mirrored by a keyboard
+            // shortcut (Space, ←/→, M, F) in the key scope above. Fixed
+            // widths keep the row from shifting when icons toggle.
             Button {
-                text: "−5 s";
+                text: "⏪";
+                width: 44px;
                 enabled: root.can_seek;
                 clicked => { root.seek_by(-5000); }
             }
             Button {
-                text: root.playing ? "⏸ Pause" : "⏵ Play";
+                text: root.playing ? "⏸" : "⏵";
+                width: 44px;
                 enabled: root.can_seek;
                 clicked => { root.play_toggled(); }
             }
             Button {
-                text: "⏹ Stop";
+                text: "⏹";
+                width: 44px;
                 enabled: root.can_seek;
                 clicked => { root.stop_clicked(); }
             }
             Button {
-                text: "+5 s";
+                text: "⏩";
+                width: 44px;
                 enabled: root.can_seek;
                 clicked => { root.seek_by(5000); }
             }
@@ -170,6 +183,7 @@ export component PlayerWindow inherits Window {
             }
             Button {
                 text: root.muted ? "🔇" : "🔊";
+                width: 44px;
                 clicked => { root.mute_toggled(); }
             }
             Slider {
@@ -181,6 +195,7 @@ export component PlayerWindow inherits Window {
             }
             Button {
                 text: "⛶";
+                width: 44px;
                 clicked => { root.fullscreen_toggled(); }
             }
         }

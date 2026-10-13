@@ -9,6 +9,7 @@
 pub mod audio;
 pub mod error;
 pub mod ffmpeg;
+pub mod frames;
 pub mod preview;
 pub mod probe;
 pub mod waveform;
@@ -17,6 +18,7 @@ pub use audio::{
     AudioPcmStream, WHISPER_SAMPLE_RATE, extract_audio_16k, stream_audio_16k, stream_pcm_s16le,
 };
 pub use error::MediaError;
+pub use frames::{DecodedFrame, FrameStreamConfig, VideoFrameStream, stream_frames};
 pub use preview::{DEFAULT_MAX_DIMENSION, PreviewConfig, RgbaFrame, decode_frame_at};
 pub use probe::probe_video;
 pub use waveform::{

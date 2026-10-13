@@ -1,8 +1,8 @@
 //! UI wiring: callback handlers, the pump timer, and event handling.
 //!
-//! The pump timer advances the playhead on the wall clock, decodes a frame a
-//! few times per second, and drains bridge events; every pass pushes the
-//! session properties into the Slint tree.
+//! The pump timer advances the playhead on the wall clock, requests the
+//! video frame due at the playhead, and drains bridge events; every pass
+//! pushes the session properties into the Slint tree.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -20,8 +20,6 @@ use crate::session::{PLAYER_LANGUAGES, Session, format_time};
 
 /// Pump cadence; ~30 Hz keeps the playhead and captions smooth.
 const PUMP_INTERVAL: Duration = Duration::from_millis(33);
-/// Throttle between frame decode requests while playing.
-const FRAME_INTERVAL: Duration = Duration::from_millis(200);
 /// Slider seeks closer than this are displayed but not restarted.
 const SEEK_DEBOUNCE_MS: u64 = 1_500;
 
@@ -72,10 +70,9 @@ impl App {
         let session = self.session.clone();
         let events = self.events.clone();
         let last_pump = Rc::new(Cell::new(Instant::now()));
-        let last_frame = Rc::new(Cell::new(Instant::now()));
         self._timer
             .start(TimerMode::Repeated, PUMP_INTERVAL, move || {
-                pump(&weak, &bridge, &session, &events, &last_pump, &last_frame);
+                pump(&weak, &bridge, &session, &events, &last_pump);
             });
     }
 
@@ -253,16 +250,15 @@ impl App {
     }
 }
 
-/// The pump: advance playback, decode frames, drain events, refresh.
-/// Runs on the UI thread; `last_pump`/`last_frame` live in caller-owned
-/// cells because the timer closure owns its state.
+/// The pump: advance playback, advance the video decoder, drain events,
+/// refresh. Runs on the UI thread; `last_pump` lives in a caller-owned cell
+/// because the timer closure owns its state.
 pub(crate) fn pump(
     weak: &Weak<PlayerWindow>,
     bridge: &Bridge,
     session: &Rc<RefCell<Session>>,
     events: &Receiver<PlayerEvent>,
     last_pump: &Rc<Cell<Instant>>,
-    last_frame: &Rc<Cell<Instant>>,
 ) {
     let Some(ui) = weak.upgrade() else { return };
     let now = Instant::now();
@@ -282,9 +278,9 @@ pub(crate) fn pump(
     drop(guard);
     refresh_playback(&ui, session);
 
-    if session.borrow().playing
-        && now.saturating_duration_since(last_frame.replace(now)) >= FRAME_INTERVAL
-    {
+    // The video decoder reads on demand: advancing every tick only costs a
+    // command when no frame is due, and a frame decode when one is.
+    if session.borrow().playing {
         bridge.request_frame(playhead);
     }
 
@@ -330,11 +326,17 @@ fn handle_event(
                 guard.set_translation(text.clone());
             }
         }
-        PlayerEvent::Frame(frame) => {
-            let mut buffer =
-                slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(frame.width, frame.height);
-            buffer.make_mut_bytes().copy_from_slice(&frame.pixels);
-            ui.set_frame(Image::from_rgba8(buffer));
+        PlayerEvent::Frame { pts_ms, frame } => {
+            // The decoder streams frames as they come due, so a frame whose
+            // timestamp drifted more than a pump tick from the playhead is
+            // stale (decode lag) or a pre-seek straggler; skipping it keeps
+            // the picture tracking the playhead.
+            if pts_ms.abs_diff(guard.playhead_ms) <= 200 {
+                let mut buffer =
+                    slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(frame.width, frame.height);
+                buffer.make_mut_bytes().copy_from_slice(&frame.pixels);
+                ui.set_frame(Image::from_rgba8(buffer));
+            }
         }
         PlayerEvent::PlaybackEnded => {
             guard.playing = false;
@@ -371,10 +373,13 @@ fn detected_label(session: &Session) -> String {
 
 /// Play/pause toggle shared by the transport button and the video click.
 fn toggle_play(ui: &PlayerWindow, bridge: &Bridge, session: &Rc<RefCell<Session>>) {
+    // The RefMut guard releases its borrow on drop, not on last use: it must
+    // be dropped before anything else re-borrows the session.
     let mut guard = session.borrow_mut();
     if guard.video.is_none() {
         guard.status = "open a video first".to_owned();
-        ui.set_status(guard.status.clone().into());
+        drop(guard);
+        ui.set_status("open a video first".into());
         return;
     }
     if guard.playing {
@@ -386,6 +391,7 @@ fn toggle_play(ui: &PlayerWindow, bridge: &Bridge, session: &Rc<RefCell<Session>
         guard.last_bridge_seek_ms = playhead;
         bridge.play_at(playhead);
     }
+    drop(guard);
     refresh_playback(ui, session);
 }
 

@@ -35,6 +35,7 @@ slint-build.workspace = true
 [dev-dependencies]
 # Headless platform for instantiating the window in tests.
 i-slint-backend-testing = "1.18"
+tempfile.workspace = true
 
 [features]
 default = []

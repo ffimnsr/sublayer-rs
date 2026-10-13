@@ -16,6 +16,7 @@ mod cli;
 mod error;
 mod session;
 mod translate_worker;
+mod video;
 #[cfg(test)]
 mod window_tests;
 

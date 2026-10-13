@@ -245,7 +245,7 @@ impl AudioPcmStream {
 
 /// Keeps the tail of ffmpeg's stderr in a bounded buffer, so no amount of
 /// decoder chatter can fill the pipe and stall the child.
-async fn drain_stderr(mut stderr: tokio::process::ChildStderr) -> Vec<u8> {
+pub(crate) async fn drain_stderr(mut stderr: tokio::process::ChildStderr) -> Vec<u8> {
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0_u8; READ_CHUNK_BYTES];
     loop {
