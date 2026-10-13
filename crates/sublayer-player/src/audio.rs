@@ -1,25 +1,25 @@
 //! Real-time audio engine for the player.
 //!
-//! One ffmpeg child decodes the audio twice: once resampled to the output
-//! format (fed to a system audio helper over stdin — `pw-cat` on PipeWire,
+//! One ffmpeg child decodes the audio resampled to the output format and
+//! feeds it to a system audio helper over stdin — `pw-cat` on PipeWire,
 //! `paplay` on PulseAudio, `aplay` on ALSA — which plays it at realtime and
-//! paces the whole pipeline by backpressure), once as 16 kHz mono for the
-//! whisper captioner. A wall clock anchors the caption reads, so captions
-//! stay aligned with the playhead even when the helper lags.
+//! paces the writes by backpressure. Reads are additionally bounded by the
+//! wall clock, so silent playback (no helper) still reaches EOF at the
+//! media's real length. Captions come from the pre-built transcript, so
+//! there is no ASR pipe.
 //!
 //! No audio library is linked at build time: the helper is resolved from
 //! `PATH` at runtime, so builds never need host dev headers. When no helper
-//! (or no sound server) exists, or the helper dies mid-play, the video and
-//! the caption track keep running, paced by the clock alone, and the status
-//! line says so. `Ended` is reserved for the media reaching EOF.
+//! (or no sound server) exists, or the helper dies mid-play, the video keeps
+//! running, paced by the clock alone, and the status line says so. `Ended` is
+//! reserved for the media reaching EOF.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use sublayer_ai::LiveCaptioner;
 use sublayer_media::{AudioPcmStream, stream_pcm_s16le};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -69,22 +69,22 @@ pub enum AudioEvent {
 
 /// Runs the driver until `commands` closes or a `Stop` arrives.
 ///
-/// `captioner` is `None` when playback uses a pre-built transcript: the ASR
-/// pipe (and its whisper feed) is skipped entirely, and the media end is
-/// reported by the pump clock instead of the ASR decoder.
+/// The media end (EOF on the speaker decode pipe) is reported as `Ended`.
 pub async fn run_audio_driver(
     video: PathBuf,
-    captioner: Option<Arc<LiveCaptioner>>,
     mut commands: mpsc::UnboundedReceiver<AudioCommand>,
     events: UnboundedSender<AudioEvent>,
 ) {
     let volume = Arc::new(AtomicU32::new(1_000));
     let muted = Arc::new(AtomicBool::new(false));
 
-    let mut readers: Option<(Option<AudioPcmStream>, Option<AudioPcmStream>)> = None;
+    let mut speaker: Option<AudioPcmStream> = None;
     let mut helper: Option<AudioHelper> = None;
+    // Output samples already handed to the helper (or dropped while silent);
+    // the wall clock bounds how much of the pipe is consumed per tick so
+    // silent playback (no helper) cannot run to EOF ahead of realtime.
+    let mut consumed = 0_u64;
     let mut started_at: Option<Instant> = None;
-    let mut consumed_asr = 0_u64;
 
     let mut ticker = tokio::time::interval(Duration::from_millis(STEP_MS));
     loop {
@@ -92,26 +92,19 @@ pub async fn run_audio_driver(
             command = commands.recv() => {
                 match command {
                     Some(AudioCommand::Start { offset_ms }) => {
-                        // Restart decoders and the caption timeline. The helper
-                        // is probed first: with no sound server behind it the
-                        // candidates exit immediately, and the speaker pipe is
-                        // only opened when one survives.
-                        readers = None;
-                        if let Some(captioner) = captioner.as_ref() {
-                            let _ = captioner.reset(offset_ms);
-                        }
-                        consumed_asr = 0;
+                        // Restart the decoder. The helper is probed first:
+                        // with no sound server behind it the candidates exit
+                        // immediately, and the speaker pipe is only opened
+                        // when one survives.
+                        speaker = None;
+                        consumed = 0;
+                        started_at = None;
                         helper = AudioHelper::spawn(&events, &volume, &muted).await;
-                        match open_readers(
-                            &video,
-                            offset_ms,
-                            helper.is_some(),
-                            captioner.is_some(),
-                        )
-                        .await
+                        match stream_pcm_s16le(&video, Some(offset_ms), OUTPUT_RATE, OUTPUT_CHANNELS)
+                            .await
                         {
-                            Ok(pair) => {
-                                readers = Some(pair);
+                            Ok(stream) => {
+                                speaker = Some(stream);
                                 started_at = Some(Instant::now());
                             }
                             Err(error) => {
@@ -135,47 +128,27 @@ pub async fn run_audio_driver(
                 }
             }
             _ = ticker.tick() => {
+                let Some(speaker) = speaker.as_mut() else { continue };
                 let Some(started) = started_at else { continue };
-                let Some((speaker, asr)) = readers.as_mut() else { continue };
-                let elapsed_ms = started.elapsed().as_millis() as u64;
 
-                // Speaker pipe: paced purely by the helper's stdin
-                // backpressure. A helper loss (or a dead speaker decoder)
-                // drops the helper and continues silently; the caption track
-                // is the product, sound is not.
-                if let Some(speaker) = speaker.as_mut() {
-                    feed_speaker(speaker, &mut helper, &events).await;
+                // 48 000 Hz × 2 channels / 1 000 ms = 96 samples per ms.
+                let due = started.elapsed().as_millis() as u64
+                    * u64::from(OUTPUT_RATE)
+                    * u64::from(OUTPUT_CHANNELS)
+                    / 1_000;
+                let take = (due.saturating_sub(consumed)).min(SPEAKER_CHUNK_SAMPLES as u64);
+                if take == 0 {
+                    continue;
                 }
 
-                // ASR pipe: 16 kHz mono, read up to the realtime position.
-                // 16 000 Hz / 1 000 ms = 16 samples per millisecond; a
-                // fractional factor would feed whisper at a fraction of
-                // realtime and no window would ever fill during a clip.
-                let asr_target = elapsed_ms * 16;
-                let asr_take = asr_target.saturating_sub(consumed_asr);
-                if asr_take > 0 {
-                    let Some(asr) = asr.as_mut() else { continue };
-                    let mut samples = vec![0.0_f32; asr_take as usize];
-                    match read_full(asr, &mut samples).await {
-                        Ok(()) => {
-                            consumed_asr += samples.len() as u64;
-                            if let Some(captioner) = captioner.as_ref() {
-                                let _ = captioner.push(samples);
-                            }
-                        }
-                        Err(ReadError::Eof) => {
-                            if let Some(captioner) = captioner.as_ref() {
-                                let _ = captioner.flush();
-                            }
-                            let _ = events.send(AudioEvent::Ended);
-                            return;
-                        }
-                        Err(ReadError::Stall) => {
-                            let _ = events.send(AudioEvent::Log("audio decoder stalled".to_owned()));
-                            return;
-                        }
-                    }
+                // The helper's stdin backpressure paces the writes; the
+                // clock bounds the reads. A helper loss (or a dead decoder)
+                // drops the helper and continues silently; reaching EOF ends
+                // playback.
+                if !feed_speaker(speaker, &mut helper, &events, take as usize).await {
+                    return;
                 }
+                consumed += take;
             }
         }
     }
@@ -200,45 +173,23 @@ async fn read_full(stream: &mut AudioPcmStream, samples: &mut [f32]) -> Result<(
     Ok(())
 }
 
-/// Opens the ASR decoder (16 kHz, when captions are live) and, when a helper
-/// is actually running, the speaker decoder at `offset_ms`.
-async fn open_readers(
-    video: &Path,
-    offset_ms: u64,
-    with_speaker: bool,
-    with_asr: bool,
-) -> Result<(Option<AudioPcmStream>, Option<AudioPcmStream>), sublayer_media::MediaError> {
-    let asr = if with_asr {
-        Some(stream_pcm_s16le(video, Some(offset_ms), 16_000, 1).await?)
-    } else {
-        None
-    };
-    let speaker = if with_speaker {
-        Some(stream_pcm_s16le(video, Some(offset_ms), OUTPUT_RATE, OUTPUT_CHANNELS).await?)
-    } else {
-        None
-    };
-    Ok((speaker, asr))
-}
-
-/// Reads one speaker chunk and pushes it to the helper as s16le.
+/// Reads `take` output samples and pushes them to the helper as s16le.
 ///
-/// A failed or wedged helper, or a dead speaker decoder, is dropped so the
-/// rest of the playback (video, captions, translation) keeps running
-/// silently; `Ended` is left to the ASR pipe, which is the media's own EOF.
+/// A failed or wedged helper is dropped so video keeps running silently;
+/// EOF on the decode pipe ends playback (`Ended`). Returns whether playback
+/// should continue.
 async fn feed_speaker(
     speaker: &mut AudioPcmStream,
     helper: &mut Option<AudioHelper>,
     events: &UnboundedSender<AudioEvent>,
-) {
-    let mut samples = vec![0.0_f32; SPEAKER_CHUNK_SAMPLES];
+    take: usize,
+) -> bool {
+    let mut samples = vec![0.0_f32; take];
     match read_full(speaker, &mut samples).await {
         Ok(()) => {
-            if samples.is_empty() {
-                return;
-            }
             let Some(active) = helper.as_mut() else {
-                return;
+                // Clock-paced silent playback; no helper to feed.
+                return true;
             };
             let written = tokio::time::timeout(WRITE_STALL, active.write(&samples)).await;
             match written {
@@ -256,18 +207,18 @@ async fn feed_speaker(
                     ));
                 }
             }
+            true
         }
         Err(ReadError::Eof) => {
-            *helper = None;
-            let _ = events.send(AudioEvent::Log(
-                "audio track ended; continuing silently".to_owned(),
-            ));
+            let _ = events.send(AudioEvent::Ended);
+            false
         }
         Err(ReadError::Stall) => {
             *helper = None;
             let _ = events.send(AudioEvent::Log(
                 "audio decoder stalled; continuing silently".to_owned(),
             ));
+            true
         }
     }
 }

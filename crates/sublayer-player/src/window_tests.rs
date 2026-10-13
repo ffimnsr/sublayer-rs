@@ -84,19 +84,22 @@ fn session_state_drives_the_overlay() {
     assert!(ui.get_can_seek());
     assert!(ui.get_file_title().contains("clip.mp4"));
 
-    // Recognized words land in the overlay (source-language subs).
-    let sentences = session.borrow_mut().feed_words(vec![
+    // Batch words land in the overlay once the batch is marked ready.
+    session.borrow_mut().prebuilding = true;
+    session.borrow_mut().feed_words(vec![
         sublayer_core::WordToken::new("Hello", 100, 400),
         sublayer_core::WordToken::new("world.", 500, 900),
     ]);
-    assert_eq!(sentences, ["Hello world."]);
+    session.borrow_mut().mark_prebuilt_ready();
     session.borrow_mut().refresh_caption(1_500);
     app.refresh_for_test();
     assert_eq!(ui.get_caption_text().as_str(), "Hello world.");
 
     // Translation on: the English card replaces the source.
     session.borrow_mut().translate_enabled = true;
-    session.borrow_mut().set_translation("¡Hola mundo!");
+    session
+        .borrow_mut()
+        .attach_prebuilt_translation("¡Hola mundo!".to_owned());
     session.borrow_mut().refresh_caption(1_500);
     app.refresh_for_test();
     assert_eq!(ui.get_caption_text().as_str(), "¡Hola mundo!");
@@ -124,10 +127,13 @@ fn play_at_the_end_restarts_from_the_start() {
     session
         .borrow_mut()
         .open_video("clip.mp4", 60_000, std::path::PathBuf::from("clip.mp4"));
-    session.borrow_mut().playhead_ms = 60_000; // the media ended
+    session.borrow_mut().prebuilding = true;
     session
         .borrow_mut()
         .feed_words(vec![sublayer_core::WordToken::new("tail", 55_000, 55_300)]);
+    session.borrow_mut().mark_prebuilt_ready();
+    session.borrow_mut().playhead_ms = 60_000; // the media ended
+    session.borrow_mut().refresh_caption(60_000);
     assert!(!session.borrow().playing);
 
     app.toggle_play_for_test();
@@ -163,7 +169,7 @@ fn seek_buttons_do_not_double_borrow_the_session() {
 }
 
 #[test]
-fn caption_words_reach_the_overlay_while_playing() {
+fn batch_words_reach_the_overlay_only_after_the_batch_ready_event() {
     ensure_platform();
     let app = App::new(None).expect("testing backend must build the window");
     let ui = &app.ui_for_test();
@@ -171,11 +177,11 @@ fn caption_words_reach_the_overlay_while_playing() {
     session
         .borrow_mut()
         .open_video("clip.mp4", 60_000, std::path::PathBuf::from("clip.mp4"));
-    session.borrow_mut().playing = true;
 
-    // The live-ASR path: recognized words arrive as player events and must
-    // land in the overlay text while playback is running.
+    // Batch words arrive as player events; there is no live ASR, so they
+    // must not land in the overlay while the batch is still running.
     let bridge = crate::bridge::Bridge::new(crossbeam_channel::unbounded().0);
+    session.borrow_mut().prebuilding = true;
     crate::app::handle_event(
         ui,
         &bridge,
@@ -184,13 +190,112 @@ fn caption_words_reach_the_overlay_while_playing() {
             "Hello", 1_000, 1_300,
         )]),
     );
-    assert!(ui.get_caption_text().as_str().contains("Hello"));
+    assert!(ui.get_caption_text().as_str().is_empty());
 
-    // The pump's own refresh (every tick) keeps the overlay populated;
-    // words inside the whisper-latency window survive.
-    session.borrow_mut().refresh_caption(8_000);
-    app.refresh_for_test();
+    // `PreTranscribed` switches the display to the pre-built timeline.
+    session.borrow_mut().playhead_ms = 1_000;
+    crate::app::handle_event(
+        ui,
+        &bridge,
+        session,
+        crate::bridge::PlayerEvent::PreTranscribed,
+    );
     assert!(ui.get_caption_text().as_str().contains("Hello"));
+}
+
+#[test]
+fn slider_scrub_then_release_keeps_playhead_and_captions_in_sync() {
+    ensure_platform();
+    let app = App::new(None).expect("testing backend must build the window");
+    let ui = &app.ui_for_test();
+    let session = app.session_for_test();
+    session
+        .borrow_mut()
+        .open_video("clip.mp4", 60_000, std::path::PathBuf::from("clip.mp4"));
+    install_batch(
+        &mut session.borrow_mut(),
+        &[
+            sublayer_core::WordToken::new("Hallo", 0, 300),
+            sublayer_core::WordToken::new("Welt.", 400, 700),
+            sublayer_core::WordToken::new("Wie", 1_500, 1_800),
+            sublayer_core::WordToken::new("geht", 1_900, 2_200),
+            sublayer_core::WordToken::new("es?", 2_300, 2_600),
+        ],
+    );
+    app.refresh_for_test();
+
+    // Dragging the slider scrub-pins the playhead and the caption; nothing
+    // is committed yet.
+    ui.invoke_scrub(1_700);
+    assert_eq!(ui.get_playhead_ms(), 1_700);
+    assert_eq!(ui.get_caption_text().as_str(), "Wie geht es?");
+    ui.invoke_scrub(500);
+    assert_eq!(ui.get_playhead_ms(), 500);
+    assert_eq!(ui.get_caption_text().as_str(), "Hallo Welt.");
+    assert!(session.borrow().scrubbing, "the drag is still in flight");
+
+    // Releasing the knob commits the seek end position.
+    ui.invoke_seek(500);
+    assert!(!session.borrow().scrubbing);
+    assert_eq!(ui.get_playhead_ms(), 500);
+    assert_eq!(ui.get_caption_text().as_str(), "Hallo Welt.");
+
+    // A committed seek jumps to its target; the caption follows instantly.
+    ui.invoke_seek(2_400);
+    assert_eq!(ui.get_playhead_ms(), 2_400);
+    assert_eq!(ui.get_caption_text().as_str(), "Wie geht es?");
+}
+
+#[test]
+fn active_playback_holds_the_playhead_during_a_scrub() {
+    ensure_platform();
+    let app = App::new(None).expect("testing backend must build the window");
+    let ui = &app.ui_for_test();
+    let session = app.session_for_test();
+    session
+        .borrow_mut()
+        .open_video("clip.mp4", 60_000, std::path::PathBuf::from("clip.mp4"));
+    install_batch(
+        &mut session.borrow_mut(),
+        &[sublayer_core::WordToken::new("Hallo", 0, 300)],
+    );
+    session.borrow_mut().playing = true;
+    app.refresh_for_test();
+
+    // A drag pins the playhead to the knob; the wall clock must not yank it
+    // forward while the user is aiming at a timestamp.
+    ui.invoke_scrub(10_000);
+    let last_pump = Rc::new(Cell::new(Instant::now()));
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(120) {
+        app.pump_for_test(&last_pump);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        ui.get_playhead_ms(),
+        10_000,
+        "scrubbing pins the playhead while playing"
+    );
+
+    // Release: the seek lands and the clock takes over again.
+    ui.invoke_seek(10_000);
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(120) {
+        app.pump_for_test(&last_pump);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        ui.get_playhead_ms() >= 10_000,
+        "playback resumes from the committed seek: {}",
+        ui.get_playhead_ms()
+    );
+}
+
+/// Installs a pre-built transcript directly (no whisper) and marks it ready.
+fn install_batch(session: &mut Session, words: &[sublayer_core::WordToken]) {
+    session.prebuilding = true;
+    session.feed_words(words.to_vec());
+    session.mark_prebuilt_ready();
 }
 
 #[test]
@@ -395,7 +500,9 @@ fn cached_transcript_skips_the_batch_on_reopen() {
 }
 
 #[test]
-fn live_captions_flow_end_to_end_with_a_real_video() {
+fn playback_without_a_prebuilt_transcript_shows_no_captions() {
+    // Regression: there is no live auto-transcription anymore; playing a
+    // video before pre-transcribing must not produce captions.
     let _e2e = E2E_LOCK.lock().unwrap();
     ensure_platform();
     let fixture =
@@ -407,58 +514,93 @@ fn live_captions_flow_end_to_end_with_a_real_video() {
 
     let app = App::new(None).expect("testing backend must build the window");
     let ui = &app.ui_for_test();
-    // Route through the real combos so the orchestrator shares the session's
-    // model/language (the cache key depends on it).
+    let session = app.session_for_test();
     ui.invoke_model_selected("tiny".into());
     ui.invoke_language_selected("English".into());
     app.refresh_for_test();
 
     app.open_for_test(fixture);
-    // Pre-drain: the probe result must arrive like in production.
     let last_pump = Rc::new(Cell::new(Instant::now()));
-    let drain_deadline = Instant::now() + Duration::from_secs(15);
-    let mut opened = false;
-    while Instant::now() < drain_deadline {
+    let open_deadline = Instant::now() + Duration::from_secs(15);
+    while !ui.get_can_seek() && Instant::now() < open_deadline {
         app.pump_for_test(&last_pump);
-        if ui.get_can_seek() {
-            opened = true;
-            break;
-        }
         std::thread::sleep(Duration::from_millis(50));
     }
-    eprintln!("opened: {opened}, status: {}", ui.get_status());
-    app.toggle_play_for_test();
-
-    // Drive the real pump loop until whisper delivers words; the caption
-    // pipeline is live (ffmpeg audio decode, VAD, whisper on its own
-    // thread, event drain into the overlay).
-    let last_pump = Rc::new(Cell::new(Instant::now()));
-    let deadline = Instant::now() + Duration::from_secs(120);
-    let mut last_status = String::new();
-    loop {
-        app.pump_for_test(&last_pump);
-        let caption = ui.get_caption_text().to_string();
-        if !caption.trim().is_empty() {
-            eprintln!(
-                "captions appeared at {} ms: {caption:?}",
-                ui.get_playhead_ms()
-            );
-            return;
-        }
-        let status = ui.get_status().to_string();
-        if status != last_status && !status.is_empty() {
-            last_status = status.clone();
-            eprintln!("status: {status}");
-        }
-        if Instant::now() > deadline {
-            panic!(
-                "no captions within 120 s; status: {status:?}, playhead: {} ms, playing: {}",
-                ui.get_playhead_ms(),
-                ui.get_playing()
-            );
-        }
-        std::thread::sleep(Duration::from_millis(100));
+    assert!(ui.get_can_seek(), "video must open");
+    // A cached transcript from an earlier run is fine — that is the feature.
+    if session.borrow().prebuilt_ready {
+        eprintln!("skipping: a cached transcript was restored");
+        return;
     }
+
+    app.toggle_play_for_test();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        app.pump_for_test(&last_pump);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        ui.get_caption_text().as_str().is_empty(),
+        "no live captions without a pre-transcription"
+    );
+}
+
+#[test]
+fn seek_while_playing_keeps_playback_running_from_the_target() {
+    // Regression: a slider seek during playback used to skip the decoder
+    // restart for small movements (< 1.5 s), leaving audio and video on
+    // different timestamps forever. The seek must always commit.
+    let _e2e = E2E_LOCK.lock().unwrap();
+    ensure_platform();
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_assets/player-test.webm");
+    if !fixture.is_file() {
+        eprintln!("skipping: test_assets/player-test.webm not present");
+        return;
+    }
+
+    let app = App::new(None).expect("testing backend must build the window");
+    let ui = &app.ui_for_test();
+    ui.invoke_model_selected("tiny".into());
+    ui.invoke_language_selected("English".into());
+    app.refresh_for_test();
+
+    app.open_for_test(fixture);
+    let last_pump = Rc::new(Cell::new(Instant::now()));
+    let open_deadline = Instant::now() + Duration::from_secs(15);
+    while !ui.get_can_seek() && Instant::now() < open_deadline {
+        app.pump_for_test(&last_pump);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(ui.get_can_seek(), "video must open");
+
+    app.toggle_play_for_test();
+    // Let playback reach a stable playhead.
+    let run_deadline = Instant::now() + Duration::from_secs(6);
+    while Instant::now() < run_deadline {
+        app.pump_for_test(&last_pump);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(ui.get_playing(), "playback must be running");
+    let base = ui.get_playhead_ms();
+    assert!(base > 1_000, "playhead should have advanced: {base}");
+
+    // A small backward seek (the old < 1.5 s debounce window) while playing.
+    ui.invoke_seek((base - 500).max(0));
+    let target = ui.get_playhead_ms();
+    assert_eq!(target, (base - 500).max(0));
+    let start = Instant::now();
+    while Instant::now() < start + Duration::from_millis(700) {
+        app.pump_for_test(&last_pump);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        ui.get_playhead_ms() > target,
+        "playback resumes from the committed seek target: {} -> {}",
+        target,
+        ui.get_playhead_ms()
+    );
+    assert!(ui.get_playing(), "playback keeps running after the seek");
 }
 
 /// Test-only accessors; the production API never exposes the window.

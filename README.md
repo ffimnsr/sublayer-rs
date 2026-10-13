@@ -41,13 +41,14 @@ video ──▶ ffprobe ──▶ 16 kHz audio ──▶ Whisper (VAD + word tim
   back to `libx264`, retrying at runtime when a probed encoder cannot start
   (a Vulkan backend is compiled in only with the `encode_vulkan` feature);
   streams percentage, fps, and ETA while rendering.
-- **Live caption foundations**: a streaming 16 kHz PCM pipe
-  (`stream_audio_16k`) and a VAD-gated rolling-window transcriber
+- **Batch caption engine**: a streaming 16 kHz PCM pipe
+  (`stream_audio_16k`) and a VAD-gated transcriber
   (`LiveTranscriber` / `LiveCaptioner`) that emit word timestamps on the
   media timeline from a dedicated worker thread — the engine behind the
-  upcoming live-caption player (`sublayer-player`, Phase 6).
-- **Live translation backends**: `sublayer-translate` translates live
-  captions **into English** — offline via the pure-Rust Firefox Translations /
+  player's **Pre-transcribe** button, which batch-transcribes the whole
+  track so captions play back instantly (`sublayer-player`).
+- **Live translation backends**: `sublayer-translate` translates caption
+  cards **into English** — offline via the pure-Rust Firefox Translations /
   Bergamot engine (`local-translate` feature, bundled source languages:
   Chinese (Simplified, Mandarin), Japanese, Korean, Spanish, Danish, Russian,
   incl. the split-vocabulary CJK bundles) or any OpenAI-compatible endpoint
@@ -69,7 +70,7 @@ video ──▶ ffprobe ──▶ 16 kHz audio ──▶ Whisper (VAD + word tim
 Whisper models are downloaded on demand into `$XDG_DATA_HOME/sublayer/models/`
 and verified against pinned SHA-256 digests. Pinned names: `tiny`, `tiny.en`,
 `base`, `base.en`, `small`, `small.en`, `large-v3-turbo` (the multilingual
-variants are the ones to pair with live translation).
+variants are the ones to pair with translation).
 
 ## Build and run
 
@@ -82,7 +83,7 @@ cargo build --release
 # Desktop studio
 ./target/release/sublayer-ui
 
-# Live-caption player
+# Caption player
 ./target/release/sublayer-player
 
 # Headless CLI
@@ -149,21 +150,29 @@ backend that fails at startup is retried down the chain and the CLI prints
 the fallback. Cards wider than the frame are scaled down automatically to
 fit the video width.
 
-## Live caption player
+## Caption player
 
-`sublayer-player` plays a video with **live captions**: whisper transcribes
-as the media plays (rolling windows, VAD-gated), the **language is detected
-automatically** on the first decoded seconds, and captions appear on the
-video in the recognized language.
+`sublayer-player` plays a video with **pre-transcribed captions**: click
+**Pre-transcribe** once and whisper batch-transcribes the whole audio track
+at full speed (words, timed caption cards, and their translations); playback
+then shows captions from that pre-built timeline instantly, with no whisper
+latency. Transcripts are cached on disk (XDG data dir, keyed by model +
+language + video), so reopening the same video skips the batch entirely.
+There is no live auto-transcription — captions appear only after you
+click Pre-transcribe (or load a cached transcript).
 
 - **Transport** — Play/Pause, Stop, −5 s / +5 s, a seek slider, a volume
   slider plus mute, and fullscreen; keyboard shortcuts work throughout
   (Space play/pause, ←/→ ±5 s, ↑/↓ volume, M mute, F fullscreen, Esc exits
-  fullscreen; clicking the video also toggles play).
+  fullscreen; clicking the video also toggles play). Dragging the slider
+  scrubs the display (playhead, caption, video frame); releasing it
+  restarts the audio and video decoders at that position, so picture,
+  sound and captions always land on the same timestamp — even while
+  paused, the frame follows the slider.
 - **Auto-detect** — leave the language selector on *Auto-detect*; the header
   shows what whisper settled on (`detected: Korean`). Picking a language
   pins it for the whole session.
-- **Translate to English** — the checkbox turns on live translation: each
+- **Translate to English** — the checkbox turns on translation: each
   finalized caption card is translated by the bundled local engine
   (zh-CN · ja · ko · es · da · ru → en, see `sublayer-translate`), and the
   English card replaces the source caption. When the detected language has

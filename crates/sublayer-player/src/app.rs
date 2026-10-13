@@ -20,8 +20,6 @@ use crate::session::{PLAYER_LANGUAGES, Session, format_time};
 
 /// Pump cadence; ~30 Hz keeps the playhead and captions smooth.
 const PUMP_INTERVAL: Duration = Duration::from_millis(33);
-/// Slider seeks closer than this are displayed but not restarted.
-const SEEK_DEBOUNCE_MS: u64 = 1_500;
 
 /// The generated window plus all wiring; created once in `main`.
 pub struct App {
@@ -179,6 +177,22 @@ impl App {
         });
 
         let weak = self.ui.as_weak();
+        let session = self.session.clone();
+        self.ui.on_scrub(move |ms| {
+            // Live scrub while dragging the seek slider: only the display
+            // (playhead, time label, caption, video frame) follows the
+            // knob; the audio decoder is restarted once on release, in
+            // `apply_seek`, so picture and sound cannot drift apart.
+            let Some(ui) = weak.upgrade() else { return };
+            let mut guard = session.borrow_mut();
+            guard.playhead_ms = (ms.max(0) as u64).min(guard.duration_ms());
+            guard.scrubbing = true;
+            drop(guard);
+            refresh_playhead(&ui, &session);
+            refresh_caption(&ui, &session);
+        });
+
+        let weak = self.ui.as_weak();
         let bridge = self.bridge.clone();
         let session = self.session.clone();
         self.ui.on_seek(move |ms| {
@@ -255,12 +269,15 @@ impl App {
             if guard.model == model {
                 return;
             }
+            // The model only affects the next pre-transcription (and the
+            // transcript cache key), so a switch mid-play is harmless; the
+            // stale transcript is dropped until Pre-transcribe runs again.
             guard.model = model.to_owned();
             bridge.set_model(model.to_owned());
-            if guard.playing {
-                guard.status = "restarting with the new model…".to_owned();
-                guard.clear_captions();
-                bridge.restart(guard.playhead_ms);
+            let had_prebuilt = guard.prebuilt_ready;
+            guard.invalidate_prebuilt();
+            if had_prebuilt {
+                guard.status = "captions cleared: re-run Pre-transcribe".to_owned();
                 ui.set_status(guard.status.clone().into());
             }
         });
@@ -279,12 +296,14 @@ impl App {
             if guard.language == language {
                 return;
             }
+            // Pinning a language only affects the next pre-transcription
+            // (and translation); playback keeps running.
             guard.language = language.clone();
             bridge.set_language(language.clone());
-            if guard.playing {
-                guard.status = "restarting with the new language…".to_owned();
-                guard.clear_captions();
-                bridge.restart(guard.playhead_ms);
+            let had_prebuilt = guard.prebuilt_ready;
+            guard.invalidate_prebuilt();
+            if had_prebuilt {
+                guard.status = "captions cleared: re-run Pre-transcribe".to_owned();
                 ui.set_status(guard.status.clone().into());
             }
         });
@@ -305,7 +324,10 @@ pub(crate) fn pump(
     let now = Instant::now();
     let elapsed = now.saturating_duration_since(last_pump.replace(now));
     let mut guard = session.borrow_mut();
-    if guard.playing {
+    // While the user drags the seek slider the playhead is pinned to the
+    // knob (see the `scrub` callback); the wall clock only advances it
+    // otherwise.
+    if guard.playing && !guard.scrubbing {
         let duration = guard.duration_ms();
         let playhead = guard.playhead_ms.saturating_add(elapsed.as_millis() as u64);
         guard.playhead_ms = playhead.min(duration);
@@ -320,8 +342,10 @@ pub(crate) fn pump(
     refresh_playback(&ui, session);
 
     // The video decoder reads on demand: advancing every tick only costs a
-    // command when no frame is due, and a frame decode when one is.
-    if session.borrow().playing {
+    // command when no frame is due, and a frame decode when one is. Frames
+    // are requested even when paused so a slider scrub shows the picture at
+    // the scrub position.
+    if session.borrow().video.is_some() {
         bridge.request_frame(playhead);
     }
 
@@ -346,7 +370,7 @@ pub(crate) fn handle_event(
         } => {
             guard.open_video(title.clone(), *duration_ms, path.clone());
             ui.set_can_seek(true);
-            ui.set_status("".into());
+            guard.status = "click Pre-transcribe for captions".to_owned();
         }
         PlayerEvent::Status(status) => guard.status = status.clone(),
         PlayerEvent::PrebuiltLoaded { words, cards } => {
@@ -385,13 +409,9 @@ pub(crate) fn handle_event(
         }
         PlayerEvent::Translated(out) => {
             if let Some(text) = out.last() {
-                if guard.prebuilding || guard.has_untranslated_cards() {
-                    // Batch mode: the translation belongs to the pre-built
-                    // card the worker just finished (submitted in order).
-                    guard.attach_prebuilt_translation(text.clone());
-                } else {
-                    guard.set_translation(text.clone());
-                }
+                // Batch mode: the translation belongs to the pre-built
+                // card the worker just finished (submitted in order).
+                guard.attach_prebuilt_translation(text.clone());
             }
         }
         PlayerEvent::Frame { pts_ms, frame } => {
@@ -466,12 +486,15 @@ fn toggle_play(ui: &PlayerWindow, bridge: &Bridge, session: &Rc<RefCell<Session>
     }
     if guard.playing {
         guard.playing = false;
+        // A scrub flag can only be stuck if the slider never reported the
+        // release (pointer grab lost mid-drag); a pause clears it.
+        guard.scrubbing = false;
         bridge.pause();
     } else {
         // Pressing play at the end of the media restarts it; anything
         // else resumes from the current playhead. A restart also drops
-        // the old caption state (stale live words would otherwise linger
-        // while the timeline runs back from zero).
+        // the old caption state (stale pre-built words would otherwise
+        // linger while the timeline runs back from zero).
         let playhead = if guard.playhead_ms >= guard.duration_ms() {
             guard.clear_captions();
             0
@@ -480,29 +503,32 @@ fn toggle_play(ui: &PlayerWindow, bridge: &Bridge, session: &Rc<RefCell<Session>
         };
         guard.playhead_ms = playhead;
         guard.playing = true;
-        guard.last_bridge_seek_ms = playhead;
+        guard.scrubbing = false;
         bridge.play_at(playhead);
     }
     drop(guard);
     refresh_playback(ui, session);
 }
 
-/// Seeks to `ms` (clamped), restarting the audio only when the movement is
-/// large enough to matter while playing.
+/// Seeks to `ms` (clamped). While playing the audio and video decoders are
+/// restarted at the target, so the picture, the sound and the captions all
+/// track the same position; while paused only the video decoder restarts
+/// (the sound stays off) so the frame follows the slider.
 fn apply_seek(ui: &PlayerWindow, bridge: &Bridge, session: &Rc<RefCell<Session>>, ms: i64) {
     let mut guard = session.borrow_mut();
     let duration = guard.duration_ms();
     let clamped = (ms.max(0) as u64).min(duration);
     guard.playhead_ms = clamped;
-    let restart = guard.playing && clamped.abs_diff(guard.last_bridge_seek_ms) >= SEEK_DEBOUNCE_MS;
-    if restart {
-        guard.last_bridge_seek_ms = clamped;
-    }
+    guard.scrubbing = false;
+    let playing = guard.playing;
     drop(guard);
-    if restart {
+    if playing {
         bridge.seek(clamped);
+    } else {
+        bridge.seek_video(clamped);
     }
     refresh_playhead(ui, session);
+    refresh_caption(ui, session);
 }
 
 fn refresh(ui: &PlayerWindow, session: &Rc<RefCell<Session>>) {

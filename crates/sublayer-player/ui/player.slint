@@ -31,6 +31,9 @@ export component PlayerWindow inherits Window {
     callback play_toggled();
     callback stop_clicked();
     callback seek_by(int);
+    /// Slider still being dragged: only the display follows the knob.
+    callback scrub(int);
+    /// Slider released (or seek committed): the decoders restart here.
     callback seek(int);
     callback volume_changed(float);
     callback mute_toggled();
@@ -102,7 +105,7 @@ export component PlayerWindow inherits Window {
             }
         }
 
-        // Video area with the live caption overlay. Clicking the picture
+        // Video area with the caption overlay. Clicking the picture
         // toggles play/pause like any self-respecting media player.
         Rectangle {
             background: black;
@@ -181,7 +184,11 @@ export component PlayerWindow inherits Window {
                 maximum: root.duration_ms;
                 value: Math.min(root.playhead_ms, root.duration_ms);
                 enabled: root.can_seek;
-                changed(value) => { root.seek(value); }
+                // Dragging only scrubs the display; the decoders restart at
+                // the final position once the knob is released, so video,
+                // audio and captions always land on the same timestamp.
+                changed(value) => { root.scrub(value); }
+                released(value) => { root.seek(value); }
             }
             Text {
                 text: root.time_label;

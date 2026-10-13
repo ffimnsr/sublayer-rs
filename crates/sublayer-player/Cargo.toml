@@ -1,6 +1,6 @@
 [package]
 name = "sublayer-player"
-description = "Slint live-caption media player with automatic language detection and live translation"
+description = "Slint caption media player with pre-transcription, automatic language detection and translation"
 version.workspace = true
 edition.workspace = true
 # Slint 1.18 requires a newer toolchain than the rest of the workspace.

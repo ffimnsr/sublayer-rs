@@ -1,9 +1,12 @@
-//! Sublayer player: a Slint window that plays media with live captions,
-//! automatic language detection, and optional live translation to English.
+//! Sublayer player: a Slint window that plays media with pre-transcribed
+//! captions, automatic language detection, optional translation to English,
+//! and a scrubbing seek bar that keeps picture, sound and captions in sync.
 //!
 //! The window is a thin shell over [`app::App`]: all playback and caption
-//! state lives in `session`, all background work (audio decoders, whisper,
-//! translation, frame decoding) runs in `bridge`, and `app` wires the two.
+//! state lives in `session`, all background work (audio decoders, whisper
+//! batches, translation, frame decoding) runs in `bridge`, and `app` wires
+//! the two. There is no live ASR — captions appear only after the user
+//! clicks Pre-transcribe.
 
 // The Slint-generated bootstrap code contains `todo!()` stubs for embedded
 // Rust components; see the studio's note in sublayer-ui/src/main.rs.
