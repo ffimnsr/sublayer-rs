@@ -52,17 +52,18 @@ pub struct MediaInfo {
 }
 
 /// One finalized pre-built caption card, with the translation slot filled
-/// in by the translation worker during the batch.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PrebuiltCard {
+/// in by the translation worker during the batch. Serde keeps the transcript
+/// cache format (see `transcript_cache`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PrebuiltCard {
     /// Media-timeline start of the first word of the sentence.
-    start_ms: u64,
+    pub(crate) start_ms: u64,
     /// Media-timeline end of the last word of the sentence.
-    end_ms: u64,
+    pub(crate) end_ms: u64,
     /// Source-language sentence.
-    source: String,
+    pub(crate) source: String,
     /// English translation once the worker delivered it.
-    translation: Option<String>,
+    pub(crate) translation: Option<String>,
 }
 
 /// Live-caption player state.
@@ -74,6 +75,10 @@ pub struct Session {
     pub status: String,
     /// Opened media; `None` until a file is picked.
     pub video: Option<MediaInfo>,
+    /// Full path of the opened media (transcript caching).
+    pub video_path: Option<std::path::PathBuf>,
+    /// Directory for on-disk transcript caches; `None` disables caching.
+    pub transcript_dir: Option<std::path::PathBuf>,
     /// Transport state.
     pub playing: bool,
     pub playhead_ms: u64,
@@ -114,10 +119,17 @@ pub struct Session {
 
 impl Session {
     /// A video was opened; resets playback, captions, and the pre-built
-    /// transcript (it belongs to the previous media).
-    pub fn open_video(&mut self, title: impl Into<String>, duration_ms: u64) {
+    /// transcript (it belongs to the previous media). A cached transcript
+    /// for `path` is restored by the bridge right after this event.
+    pub fn open_video(
+        &mut self,
+        title: impl Into<String>,
+        duration_ms: u64,
+        path: std::path::PathBuf,
+    ) {
         self.file_title = title.into();
         self.video = Some(MediaInfo { duration_ms });
+        self.video_path = Some(path);
         self.playing = false;
         self.playhead_ms = 0;
         self.clear_captions();
@@ -309,14 +321,40 @@ impl Session {
     }
 
     /// The batch finished: sort and dedupe the words (live and batch words
-    /// can interleave when play started mid-build) and switch the display to
-    /// the pre-built timeline.
+    /// can interleave when play started mid-build), switch the display to
+    /// the pre-built timeline, and cache the transcript on disk so the next
+    /// open of the same video is instant.
     pub fn mark_prebuilt_ready(&mut self) {
         self.prebuilding = false;
         self.prebuilt_ready = true;
         self.prebuilt.sort_by_key(|word| word.start_ms);
         self.prebuilt
             .dedup_by(|a, b| a.start_ms == b.start_ms && a.end_ms == b.end_ms && a.text == b.text);
+        self.save_transcript_cache();
+    }
+
+    /// Installs a transcript restored from the on-disk cache (see
+    /// `transcript_cache`); the batch itself is not re-run.
+    pub fn install_prebuilt(&mut self, words: Vec<WordToken>, cards: Vec<PrebuiltCard>) {
+        self.prebuilt = words;
+        self.prebuilt_cards = cards;
+    }
+
+    /// Stores the current transcript under the XDG cache directory when one
+    /// is configured; failures are silent (the batch simply re-runs next
+    /// time).
+    fn save_transcript_cache(&self) {
+        let (Some(dir), Some(path)) = (&self.transcript_dir, &self.video_path) else {
+            return;
+        };
+        let _ = crate::transcript_cache::save(
+            dir,
+            path,
+            &self.model,
+            self.language.as_deref(),
+            &self.prebuilt,
+            &self.prebuilt_cards,
+        );
     }
 
     /// Attaches an English translation to the oldest pre-built card that
@@ -554,7 +592,7 @@ mod tests {
             ..Session::default()
         };
         session.feed_words(vec![word("leftover", 0)]);
-        session.open_video("clip.mp4", 60_000);
+        session.open_video("clip.mp4", 60_000, std::path::PathBuf::from("clip.mp4"));
         assert_eq!(session.playhead_ms, 0);
         assert!(!session.playing);
         assert_eq!(session.duration_ms(), 60_000);

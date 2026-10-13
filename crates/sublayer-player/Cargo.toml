@@ -18,12 +18,15 @@ sublayer-core.workspace = true
 sublayer-media.workspace = true
 sublayer-ai.workspace = true
 sublayer-translate = { workspace = true, features = ["local-translate", "download"] }
+serde.workspace = true
+serde_json.workspace = true
 slint.workspace = true
 # Audio goes through a system helper resolved at runtime (pw-cat / paplay /
 # aplay), so the build needs no host audio dev headers.
 which.workspace = true
 crossbeam-channel.workspace = true
 rfd.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

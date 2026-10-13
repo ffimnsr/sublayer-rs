@@ -18,6 +18,7 @@ use sublayer_translate::{LocalPair, TranslationModelManager, find_local_pair};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::audio::{AudioCommand, AudioEvent, run_audio_driver};
+use crate::transcript_cache;
 use crate::translate_worker::{TranslateEvent, TranslateWorker};
 use crate::video::{VideoCommand, VideoEvent, run_video_driver};
 
@@ -28,9 +29,19 @@ const ASR_WINDOW_MS: u64 = 4_000;
 #[derive(Debug)]
 pub enum PlayerEvent {
     /// Probe finished; the media can be played.
-    Opened { title: String, duration_ms: u64 },
+    Opened {
+        title: String,
+        duration_ms: u64,
+        /// Full path of the media (transcript caching).
+        path: PathBuf,
+    },
     /// Status-line text.
     Status(String),
+    /// A cached transcript was restored; captions are pre-built already.
+    PrebuiltLoaded {
+        words: Vec<WordToken>,
+        cards: Vec<crate::session::PrebuiltCard>,
+    },
     /// Recognized words (media-timeline timestamps).
     Words(Vec<WordToken>),
     /// Whisper settled on a language (auto mode).
@@ -330,9 +341,13 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
     let mut drivers = Drivers::default();
     // Batch pre-transcription state: the captioner is busy with the whole
     // file while `prebuilding`; once `prebuilt_ready`, playback skips the
-    // live ASR entirely and shows the pre-built timeline.
+    // live ASR entirely and shows the pre-built timeline. `prebuilt_model`
+    // records the model the words came from (from cache or a fresh batch) so
+    // a model switch invalidates them.
     let mut prebuilding = false;
     let mut prebuilt_ready = false;
+    let mut prebuilt_model: Option<String> = None;
+    let transcript_dir = paths.data_dir().join("transcripts");
 
     loop {
         tokio::select! {
@@ -342,7 +357,22 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                     Command::Open(path) => {
                         prebuilding = false;
                         prebuilt_ready = false;
+                        prebuilt_model = None;
                         open(&mut video, &path, &events).await;
+                        // Restore a cached transcript for this video if one
+                        // exists for the current model/language.
+                        if let Some((path, _)) = video.as_ref()
+                            && let Some((words, cards)) = transcript_cache::load(
+                                &transcript_dir,
+                                path,
+                                &pipeline.model,
+                                pipeline.language.as_deref(),
+                            )
+                        {
+                            prebuilt_ready = true;
+                            prebuilt_model = Some(pipeline.model.clone());
+                            let _ = events.send(PlayerEvent::PrebuiltLoaded { words, cards });
+                        }
                     }
                     Command::PlayAt(offset_ms) => {
                         if video.is_none() {
@@ -354,6 +384,8 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                                 "preparing the speech model…".to_owned(),
                             ));
                         }
+                        let use_prebuilt = prebuilt_ready
+                            && prebuilt_model.as_deref() == Some(pipeline.model.as_str());
                         let started = ensure_and_start(
                             &mut pipeline,
                             &model_manager,
@@ -361,7 +393,7 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                             video.as_ref().map(|(path, info)| (path.clone(), info.metadata.clone())),
                             offset_ms,
                             &events,
-                            prebuilt_ready,
+                            use_prebuilt,
                         )
                         .await;
                         if started {
@@ -480,11 +512,17 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                     }
                     Command::Model(model) => {
                         pipeline.model = model;
+                        // Words from another model are stale.
+                        prebuilt_ready = false;
+                        prebuilt_model = None;
                     }
                     Command::Language(language) => {
                         pipeline.language = language.clone();
                         translate.pinned = language;
                         translate.apply_pair(&events).await;
+                        // Words from another language pin are stale.
+                        prebuilt_ready = false;
+                        prebuilt_model = None;
                     }
                     Command::Translate(enabled) => {
                         translate.enabled = enabled;
@@ -520,9 +558,10 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                             if prebuilding {
                                 // The batch's last words were delivered before
                                 // this marker; switch playback to the pre-built
-                                // timeline.
+                                // timeline and remember the model it came from.
                                 prebuilding = false;
                                 prebuilt_ready = true;
+                                prebuilt_model = Some(pipeline.model.clone());
                                 let _ = events.send(PlayerEvent::PreTranscribed);
                             }
                         }
@@ -709,7 +748,11 @@ async fn open(video: &mut Option<(PathBuf, VideoInfo)>, path: &Path, events: &Se
                 .unwrap_or_else(|| path.display().to_string());
             let duration_ms = (metadata.duration_seconds * 1_000.0) as u64;
             *video = Some((path.to_path_buf(), VideoInfo { metadata }));
-            let _ = events.send(PlayerEvent::Opened { title, duration_ms });
+            let _ = events.send(PlayerEvent::Opened {
+                title,
+                duration_ms,
+                path: path.to_path_buf(),
+            });
         }
         Err(error) => {
             let _ = events.send(PlayerEvent::Status(format!("cannot open video: {error}")));

@@ -44,6 +44,15 @@ impl App {
         // derived default of 0% any interaction would mute playback, so the
         // player boots at full volume matching the driver's own default.
         session.borrow_mut().volume_percent = 100;
+        // Transcripts are cached under the XDG data directory so the next
+        // open of the same video (with the same model) is instant.
+        if let Ok(paths) = sublayer_core::SublayerPaths::resolve() {
+            session.borrow_mut().transcript_dir = Some(paths.data_dir().join("transcripts"));
+        }
+        // Keep the orchestrator's model in sync with the session default so
+        // the cache key (model + language + file) matches on the first open.
+        let default_model = session.borrow().model.clone();
+        bridge.set_model(default_model);
 
         install_static_options(&ui, &session);
 
@@ -325,12 +334,24 @@ pub(crate) fn handle_event(
 ) {
     let mut guard = session.borrow_mut();
     match &event {
-        PlayerEvent::Opened { title, duration_ms } => {
-            guard.open_video(title.clone(), *duration_ms);
+        PlayerEvent::Opened {
+            title,
+            duration_ms,
+            path,
+        } => {
+            guard.open_video(title.clone(), *duration_ms, path.clone());
             ui.set_can_seek(true);
             ui.set_status("".into());
         }
         PlayerEvent::Status(status) => guard.status = status.clone(),
+        PlayerEvent::PrebuiltLoaded { words, cards } => {
+            guard.install_prebuilt(words.clone(), cards.clone());
+            guard.prebuilding = false;
+            guard.prebuilt_ready = true;
+            guard.status = format!("captions ready from cache ({} words)", words.len());
+            let playhead = guard.playhead_ms;
+            guard.refresh_caption(playhead);
+        }
         PlayerEvent::Words(words) => {
             let sentences = guard.feed_words(words.clone());
             let translate_on = guard.translate_enabled && guard.translation_available();
@@ -433,7 +454,17 @@ fn toggle_play(ui: &PlayerWindow, bridge: &Bridge, session: &Rc<RefCell<Session>
         guard.playing = false;
         bridge.pause();
     } else {
-        let playhead = guard.playhead_ms;
+        // Pressing play at the end of the media restarts it; anything
+        // else resumes from the current playhead. A restart also drops
+        // the old caption state (stale live words would otherwise linger
+        // while the timeline runs back from zero).
+        let playhead = if guard.playhead_ms >= guard.duration_ms() {
+            guard.clear_captions();
+            0
+        } else {
+            guard.playhead_ms
+        };
+        guard.playhead_ms = playhead;
         guard.playing = true;
         guard.last_bridge_seek_ms = playhead;
         bridge.play_at(playhead);

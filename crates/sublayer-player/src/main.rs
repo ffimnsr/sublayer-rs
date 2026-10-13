@@ -15,6 +15,7 @@ mod bridge;
 mod cli;
 mod error;
 mod session;
+mod transcript_cache;
 mod translate_worker;
 mod video;
 #[cfg(test)]
