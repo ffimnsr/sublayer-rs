@@ -572,7 +572,9 @@ mod tests {
             };
             assert!(session.translation_available(), "{code} must be bundled");
         }
-        for code in ["en", "de", "fr", "sw"] {
+        // No Traditional-Chinese model exists in Mozilla's collection yet,
+        // so zh-TW must report unavailable until one is bundled.
+        for code in ["en", "de", "fr", "sw", "zh-TW"] {
             let session = Session {
                 detected_language: Some(code.to_owned()),
                 ..Session::default()

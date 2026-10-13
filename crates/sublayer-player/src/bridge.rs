@@ -796,7 +796,7 @@ async fn build_captioner(
         .map_err(|error| format!("model `{model}`: {error}"))?;
     let config = LiveTranscriberConfig {
         model_path,
-        language: language.map(str::to_owned),
+        language: whisper_language(language),
         enable_vad: true,
         use_gpu: false,
         threads: std::thread::available_parallelism()
@@ -806,4 +806,31 @@ async fn build_captioner(
         min_flush_ms: 200,
     };
     LiveCaptioner::new(config).map_err(|error| format!("whisper: {error}"))
+}
+
+/// Whisper's language table has exactly one Mandarin code (`"zh"`); script
+/// pins (`"zh-CN"`, later `"zh-TW"`) select the translation pair, not the
+/// caption model — an unknown code would silently fall back to auto-detect,
+/// so Mandarin pins are mapped onto `"zh"`.
+fn whisper_language(pinned: Option<&str>) -> Option<String> {
+    pinned.map(|code| {
+        if matches!(code, "zh-CN" | "zh-TW") {
+            "zh".to_owned()
+        } else {
+            code.to_owned()
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::whisper_language;
+
+    #[test]
+    fn mandarin_script_pins_map_to_whispers_zh() {
+        assert_eq!(whisper_language(Some("zh-CN")), Some("zh".to_owned()));
+        assert_eq!(whisper_language(Some("zh-TW")), Some("zh".to_owned()));
+        assert_eq!(whisper_language(Some("ko")), Some("ko".to_owned()));
+        assert_eq!(whisper_language(None), None);
+    }
 }
