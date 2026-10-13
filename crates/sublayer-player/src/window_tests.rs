@@ -20,6 +20,11 @@ thread_local! {
     static PLATFORM_READY: Cell<bool> = const { Cell::new(false) };
 }
 
+/// The heavy end-to-end tests saturate the CPU (two whisper decoders plus
+/// several ffmpeg pipes when they run at once); a shared lock makes them run
+/// one after the other so they cannot starve each other.
+static E2E_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Installs the testing backend once per thread (re-initializing panics).
 fn ensure_platform() {
     PLATFORM_READY.with(|ready| {
@@ -147,7 +152,77 @@ fn caption_words_reach_the_overlay_while_playing() {
 }
 
 #[test]
+fn prebuilt_captions_show_instantly_on_play() {
+    let _e2e = E2E_LOCK.lock().unwrap();
+    ensure_platform();
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_assets/player-test.webm");
+    if !fixture.is_file() {
+        eprintln!("skipping: test_assets/player-test.webm not present");
+        return;
+    }
+
+    let app = App::new().expect("testing backend must build the window");
+    let ui = &app.ui_for_test();
+    let session = app.session_for_test();
+    session.borrow_mut().model = "tiny".to_owned();
+    session.borrow_mut().language = Some("en".to_owned());
+    app.refresh_for_test();
+
+    app.open_for_test(fixture);
+    let last_pump = Rc::new(Cell::new(Instant::now()));
+    let open_deadline = Instant::now() + Duration::from_secs(15);
+    while !ui.get_can_seek() && Instant::now() < open_deadline {
+        app.pump_for_test(&last_pump);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(ui.get_can_seek(), "video must open");
+
+    // Batch-transcribe the whole track, then play: captions must appear
+    // from the pre-built timeline immediately, with no whisper lag.
+    ui.invoke_pre_transcribe_clicked();
+    let batch_deadline = Instant::now() + Duration::from_secs(150);
+    while Instant::now() < batch_deadline {
+        app.pump_for_test(&last_pump);
+        {
+            let guard = session.borrow();
+            if guard.prebuilt_ready {
+                break;
+            }
+            if guard.status.contains("failed") && !guard.prebuilding {
+                panic!("pre-transcribe failed: {}", guard.status);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        session.borrow().prebuilt_ready,
+        "batch must finish; words: {}, status: {}",
+        session.borrow().prebuilt_word_count(),
+        ui.get_status()
+    );
+
+    app.toggle_play_for_test();
+    let caption_deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        app.pump_for_test(&last_pump);
+        let caption = ui.get_caption_text().to_string();
+        let playhead = ui.get_playhead_ms();
+        if !caption.trim().is_empty() && playhead < 4_000 {
+            eprintln!("prebuilt captions at {} ms: {caption:?}", playhead);
+            return;
+        }
+        assert!(
+            Instant::now() < caption_deadline,
+            "no prebuilt captions within 8 s; playhead: {playhead}, caption: {caption:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
 fn live_captions_flow_end_to_end_with_a_real_video() {
+    let _e2e = E2E_LOCK.lock().unwrap();
     ensure_platform();
     let fixture =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_assets/player-test.webm");

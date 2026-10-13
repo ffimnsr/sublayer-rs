@@ -99,6 +99,29 @@ impl App {
         let weak = self.ui.as_weak();
         let bridge = self.bridge.clone();
         let session = self.session.clone();
+        self.ui.on_pre_transcribe_clicked(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut guard = session.borrow_mut();
+            if guard.video.is_none() {
+                guard.status = "open a video first".to_owned();
+                drop(guard);
+                ui.set_status("open a video first".into());
+                return;
+            }
+            // Batch-transcribe the whole track; playback then shows captions
+            // (and translations) from the pre-built timeline instantly.
+            guard.prebuilding = true;
+            guard.prebuilt_ready = false;
+            guard.prebuilt_clear_for_batch();
+            guard.status = "pre-transcribing…".to_owned();
+            drop(guard);
+            bridge.pre_transcribe();
+            ui.set_status("pre-transcribing…".into());
+        });
+
+        let weak = self.ui.as_weak();
+        let bridge = self.bridge.clone();
+        let session = self.session.clone();
         self.ui.on_play_toggled(move || {
             let Some(ui) = weak.upgrade() else { return };
             toggle_play(&ui, &bridge, &session);
@@ -322,7 +345,13 @@ pub(crate) fn handle_event(
         }
         PlayerEvent::Translated(out) => {
             if let Some(text) = out.last() {
-                guard.set_translation(text.clone());
+                if guard.prebuilding || guard.has_untranslated_cards() {
+                    // Batch mode: the translation belongs to the pre-built
+                    // card the worker just finished (submitted in order).
+                    guard.attach_prebuilt_translation(text.clone());
+                } else {
+                    guard.set_translation(text.clone());
+                }
             }
         }
         PlayerEvent::Frame { pts_ms, frame } => {
@@ -336,6 +365,20 @@ pub(crate) fn handle_event(
                 buffer.make_mut_bytes().copy_from_slice(&frame.pixels);
                 ui.set_frame(Image::from_rgba8(buffer));
             }
+        }
+        PlayerEvent::PreTranscribed => {
+            guard.mark_prebuilt_ready();
+            let translating = if guard.translate_enabled && !guard.translations_done() {
+                " · translating"
+            } else {
+                ""
+            };
+            guard.status = format!(
+                "captions ready ({} words){translating}",
+                guard.prebuilt_word_count()
+            );
+            let playhead = guard.playhead_ms;
+            guard.refresh_caption(playhead);
         }
         PlayerEvent::PlaybackEnded => {
             guard.playing = false;

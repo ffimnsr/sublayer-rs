@@ -413,6 +413,10 @@ pub enum LiveEvent {
     /// A window failed to decode; the pipeline continues with the next one.
     /// The failed audio is dropped.
     Error(AiError),
+    /// A [`LiveCaptioner::flush`] completed: everything pushed before it has
+    /// been decoded and its words already delivered. Batches (full-file
+    /// pre-transcription) use this as their completion marker.
+    Flushed,
 }
 
 /// Async-friendly facade over [`LiveTranscriber`].
@@ -520,7 +524,14 @@ fn run_worker(
         }
         let result = match command {
             Command::Push(samples) => transcriber.push(&samples),
-            Command::Flush => transcriber.flush(),
+            Command::Flush => {
+                let result = transcriber.flush();
+                forward(result, &events);
+                // The tail decode (if any) already delivered its words above;
+                // mark the batch complete.
+                let _ = events.send(LiveEvent::Flushed);
+                continue;
+            }
             Command::Reset(offset_ms) => {
                 transcriber.reset(offset_ms);
                 continue;
@@ -873,13 +884,17 @@ mod tests {
         captioner.flush().unwrap();
 
         let mut saw_words = false;
+        let mut saw_flushed = false;
         let start = std::time::Instant::now();
         let deadline = std::time::Duration::from_secs(180);
-        if let Some(event) =
-            tokio::time::timeout(deadline.saturating_sub(start.elapsed()), events.recv())
-                .await
-                .expect("live worker must keep producing events")
-        {
+        while !(saw_words && saw_flushed) && start.elapsed() < deadline {
+            let Some(event) =
+                tokio::time::timeout(deadline.saturating_sub(start.elapsed()), events.recv())
+                    .await
+                    .expect("live worker must keep producing events")
+            else {
+                break;
+            };
             match event {
                 LiveEvent::Words(words) => {
                     saw_words = true;
@@ -892,9 +907,11 @@ mod tests {
                     eprintln!("detected language: {language}");
                 }
                 LiveEvent::Error(error) => panic!("unexpected live error: {error}"),
+                LiveEvent::Flushed => saw_flushed = true,
             }
         }
         assert!(saw_words, "tone must transcribe into at least one word");
+        assert!(saw_flushed, "flush must mark the batch complete");
 
         captioner.shutdown();
     }

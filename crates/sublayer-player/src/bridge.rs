@@ -44,6 +44,9 @@ pub enum PlayerEvent {
         /// The frame pixels.
         frame: RgbaFrame,
     },
+    /// A full-file batch transcription finished; captions now come from the
+    /// pre-built timeline (no whisper latency).
+    PreTranscribed,
     /// Playback reached the end of the media.
     PlaybackEnded,
 }
@@ -142,6 +145,15 @@ impl Bridge {
         self.send(Command::TranslateSentence(sentence));
     }
 
+    /// Starts a full-file batch transcription: the whole audio track is fed
+    /// to whisper at full speed; words (and their translations, when
+    /// enabled) arrive as `Words`/`Translated`, completed by
+    /// `PreTranscribed`. Playback then shows captions from the pre-built
+    /// timeline with no whisper latency.
+    pub fn pre_transcribe(&self) {
+        self.send(Command::PreTranscribe);
+    }
+
     /// Advances the video decoder to `timestamp_ms`, emitting the frame that
     /// is due there; the result arrives as a `Frame`.
     pub fn request_frame(&self, timestamp_ms: u64) {
@@ -171,6 +183,8 @@ enum Command {
     Language(Option<String>),
     Translate(bool),
     TranslateSentence(String),
+    /// Full-file batch transcription (see [`Bridge::pre_transcribe`]).
+    PreTranscribe,
     Frame(u64),
 }
 
@@ -314,13 +328,22 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
     let mut pipeline = CaptionPipeline::new();
     let mut translate = TranslateState::new(translate_root);
     let mut drivers = Drivers::default();
+    // Batch pre-transcription state: the captioner is busy with the whole
+    // file while `prebuilding`; once `prebuilt_ready`, playback skips the
+    // live ASR entirely and shows the pre-built timeline.
+    let mut prebuilding = false;
+    let mut prebuilt_ready = false;
 
     loop {
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else { break };
                 match command {
-                    Command::Open(path) => open(&mut video, &path, &events).await,
+                    Command::Open(path) => {
+                        prebuilding = false;
+                        prebuilt_ready = false;
+                        open(&mut video, &path, &events).await;
+                    }
                     Command::PlayAt(offset_ms) => {
                         if video.is_none() {
                             let _ = events.send(PlayerEvent::Status("open a video first".to_owned()));
@@ -338,10 +361,82 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                             video.as_ref().map(|(path, info)| (path.clone(), info.metadata.clone())),
                             offset_ms,
                             &events,
+                            prebuilt_ready,
                         )
                         .await;
                         if started {
                             let _ = events.send(PlayerEvent::Status("playing".to_owned()));
+                        }
+                    }
+                    Command::PreTranscribe => {
+                        if prebuilding {
+                            let _ = events.send(PlayerEvent::Status(
+                                "already pre-transcribing…".to_owned(),
+                            ));
+                            continue;
+                        }
+                        let Some((path, _)) = video.as_ref() else {
+                            let _ = events.send(PlayerEvent::Status(
+                                "open a video first".to_owned(),
+                            ));
+                            continue;
+                        };
+                        if !ensure_captioner(&mut pipeline, &model_manager, &events).await {
+                            continue;
+                        }
+                        let Some(captioner) = pipeline.captioner.clone() else {
+                            continue;
+                        };
+                        match captioner.reset(0) {
+                            Ok(()) => {}
+                            Err(error) => {
+                                let _ = events.send(PlayerEvent::Status(format!(
+                                    "whisper: {error}"
+                                )));
+                                continue;
+                            }
+                        }
+                        let mut stream = match sublayer_media::stream_audio_16k(path).await {
+                            Ok(stream) => stream,
+                            Err(error) => {
+                                let _ = events.send(PlayerEvent::Status(format!(
+                                    "pre-transcribe failed: {error}"
+                                )));
+                                continue;
+                            }
+                        };
+                        prebuilding = true;
+                        prebuilt_ready = false;
+                        // Feed the whole track at full speed, in window-sized
+                        // pieces so the transcriber's buffer stays bounded.
+                        let mut chunk = vec![0.0_f32; 64_000];
+                        let mut stalled = false;
+                        loop {
+                            match stream.read_samples(&mut chunk).await {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    if captioner
+                                        .push(chunk[..n].to_vec())
+                                        .is_err()
+                                    {
+                                        stalled = true;
+                                        break;
+                                    }
+                                }
+                                Err(error) => {
+                                    let _ = events.send(PlayerEvent::Status(format!(
+                                        "pre-transcribe failed: {error}"
+                                    )));
+                                    stalled = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !stalled {
+                            // The worker's `Flushed` marks the batch complete
+                            // (after the tail decode); playback then switches
+                            // to the pre-built timeline.
+                            let _ = captioner.flush();
                         }
                     }
                     Command::Pause | Command::Stop => {
@@ -369,6 +464,7 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                             video.as_ref().map(|(path, info)| (path.clone(), info.metadata.clone())),
                             offset_ms,
                             &events,
+                            prebuilt_ready,
                         )
                         .await;
                     }
@@ -419,6 +515,16 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                         }
                         LiveEvent::Error(error) => {
                             let _ = events.send(PlayerEvent::Status(format!("whisper: {error}")));
+                        }
+                        LiveEvent::Flushed => {
+                            if prebuilding {
+                                // The batch's last words were delivered before
+                                // this marker; switch playback to the pre-built
+                                // timeline.
+                                prebuilding = false;
+                                prebuilt_ready = true;
+                                let _ = events.send(PlayerEvent::PreTranscribed);
+                            }
                         }
                     }
                 }
@@ -518,9 +624,11 @@ async fn next_audio_event(
     }
 }
 
-/// Rebuilds the captioner when the model/language changed, then starts (or
-/// restarts) the audio and video drivers at `offset_ms`. `video` is `None`
-/// after a failed open; returns whether playback started.
+/// Ensures the caption pipeline matches the pinned model/language, then
+/// starts (or restarts) the audio and video drivers at `offset_ms`. `video`
+/// is `None` after a failed open; with a pre-built transcript the audio
+/// driver runs without the live ASR (captions come from the batch). Returns
+/// whether playback started.
 async fn ensure_and_start(
     pipeline: &mut CaptionPipeline,
     model_manager: &ModelManager,
@@ -528,27 +636,20 @@ async fn ensure_and_start(
     video: Option<(PathBuf, VideoMetadata)>,
     offset_ms: u64,
     events: &Sender<PlayerEvent>,
+    prebuilt_ready: bool,
 ) -> bool {
     let Some((video, metadata)) = video else {
         let _ = events.send(PlayerEvent::Status("open a video first".to_owned()));
         return false;
     };
-    if pipeline.stale() {
-        match build_captioner(&pipeline.model, pipeline.language.as_deref(), model_manager).await {
-            Ok(mut captioner) => {
-                let events_rx = captioner.take_events();
-                pipeline.captioner = Some(Arc::new(captioner));
-                pipeline.events = Some(events_rx);
-                pipeline.model_used = Some(pipeline.model.clone());
-                pipeline.language_used = Some(pipeline.language.clone());
-            }
-            Err(error) => {
-                let _ = events.send(PlayerEvent::Status(error));
-                return false;
-            }
-        }
+    if !ensure_captioner(pipeline, model_manager, events).await {
+        return false;
     }
-    let captioner = pipeline.captioner.clone().expect("pipeline just built");
+    let captioner = if prebuilt_ready {
+        None
+    } else {
+        pipeline.captioner.clone()
+    };
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     drivers.audio_events = Some(events_rx);
     let (command_tx, command_rx) = mpsc::unbounded_channel();
@@ -568,6 +669,35 @@ async fn ensure_and_start(
     let _ = command_tx.send(VideoCommand::Start { offset_ms });
     drivers.video_tx = Some(command_tx);
     true
+}
+
+/// Rebuilds the captioner when the model/language changed; returns whether
+/// the pipeline is ready to transcribe.
+async fn ensure_captioner(
+    pipeline: &mut CaptionPipeline,
+    model_manager: &ModelManager,
+    events: &Sender<PlayerEvent>,
+) -> bool {
+    if !pipeline.stale() {
+        return true;
+    }
+    let _ = events.send(PlayerEvent::Status(
+        "preparing the speech model…".to_owned(),
+    ));
+    match build_captioner(&pipeline.model, pipeline.language.as_deref(), model_manager).await {
+        Ok(mut captioner) => {
+            let events_rx = captioner.take_events();
+            pipeline.captioner = Some(Arc::new(captioner));
+            pipeline.events = Some(events_rx);
+            pipeline.model_used = Some(pipeline.model.clone());
+            pipeline.language_used = Some(pipeline.language.clone());
+            true
+        }
+        Err(error) => {
+            let _ = events.send(PlayerEvent::Status(error));
+            false
+        }
+    }
 }
 
 async fn open(video: &mut Option<(PathBuf, VideoInfo)>, path: &Path, events: &Sender<PlayerEvent>) {

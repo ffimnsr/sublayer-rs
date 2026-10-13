@@ -68,16 +68,20 @@ pub enum AudioEvent {
 }
 
 /// Runs the driver until `commands` closes or a `Stop` arrives.
+///
+/// `captioner` is `None` when playback uses a pre-built transcript: the ASR
+/// pipe (and its whisper feed) is skipped entirely, and the media end is
+/// reported by the pump clock instead of the ASR decoder.
 pub async fn run_audio_driver(
     video: PathBuf,
-    captioner: Arc<LiveCaptioner>,
+    captioner: Option<Arc<LiveCaptioner>>,
     mut commands: mpsc::UnboundedReceiver<AudioCommand>,
     events: UnboundedSender<AudioEvent>,
 ) {
     let volume = Arc::new(AtomicU32::new(1_000));
     let muted = Arc::new(AtomicBool::new(false));
 
-    let mut readers: Option<(Option<AudioPcmStream>, AudioPcmStream)> = None;
+    let mut readers: Option<(Option<AudioPcmStream>, Option<AudioPcmStream>)> = None;
     let mut helper: Option<AudioHelper> = None;
     let mut started_at: Option<Instant> = None;
     let mut consumed_asr = 0_u64;
@@ -93,10 +97,19 @@ pub async fn run_audio_driver(
                         // candidates exit immediately, and the speaker pipe is
                         // only opened when one survives.
                         readers = None;
-                        let _ = captioner.reset(offset_ms);
+                        if let Some(captioner) = captioner.as_ref() {
+                            let _ = captioner.reset(offset_ms);
+                        }
                         consumed_asr = 0;
                         helper = AudioHelper::spawn(&events, &volume, &muted).await;
-                        match open_readers(&video, offset_ms, helper.is_some()).await {
+                        match open_readers(
+                            &video,
+                            offset_ms,
+                            helper.is_some(),
+                            captioner.is_some(),
+                        )
+                        .await
+                        {
                             Ok(pair) => {
                                 readers = Some(pair);
                                 started_at = Some(Instant::now());
@@ -139,14 +152,19 @@ pub async fn run_audio_driver(
                 let asr_target = elapsed_ms * 16;
                 let asr_take = asr_target.saturating_sub(consumed_asr);
                 if asr_take > 0 {
+                    let Some(asr) = asr.as_mut() else { continue };
                     let mut samples = vec![0.0_f32; asr_take as usize];
                     match read_full(asr, &mut samples).await {
                         Ok(()) => {
                             consumed_asr += samples.len() as u64;
-                            let _ = captioner.push(samples);
+                            if let Some(captioner) = captioner.as_ref() {
+                                let _ = captioner.push(samples);
+                            }
                         }
                         Err(ReadError::Eof) => {
-                            let _ = captioner.flush();
+                            if let Some(captioner) = captioner.as_ref() {
+                                let _ = captioner.flush();
+                            }
                             let _ = events.send(AudioEvent::Ended);
                             return;
                         }
@@ -180,14 +198,19 @@ async fn read_full(stream: &mut AudioPcmStream, samples: &mut [f32]) -> Result<(
     Ok(())
 }
 
-/// Opens the ASR decoder and, when a helper is actually running, the speaker
-/// decoder at `offset_ms`.
+/// Opens the ASR decoder (16 kHz, when captions are live) and, when a helper
+/// is actually running, the speaker decoder at `offset_ms`.
 async fn open_readers(
     video: &Path,
     offset_ms: u64,
     with_speaker: bool,
-) -> Result<(Option<AudioPcmStream>, AudioPcmStream), sublayer_media::MediaError> {
-    let asr = stream_pcm_s16le(video, Some(offset_ms), 16_000, 1).await?;
+    with_asr: bool,
+) -> Result<(Option<AudioPcmStream>, Option<AudioPcmStream>), sublayer_media::MediaError> {
+    let asr = if with_asr {
+        Some(stream_pcm_s16le(video, Some(offset_ms), 16_000, 1).await?)
+    } else {
+        None
+    };
     let speaker = if with_speaker {
         Some(stream_pcm_s16le(video, Some(offset_ms), OUTPUT_RATE, OUTPUT_CHANNELS).await?)
     } else {

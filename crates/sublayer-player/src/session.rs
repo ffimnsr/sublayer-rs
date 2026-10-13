@@ -35,6 +35,13 @@ const FINALIZE_GAP_MS: u64 = 900;
 /// captions visible instead of pruning them before display.
 const LIVE_WINDOW_MS: u64 = 12_000;
 
+/// Rolling window for pre-built (batch-transcribed) captions: they have no
+/// whisper latency, so a short linger keeps the line current.
+const PREBUILT_LINGER_MS: u64 = 3_000;
+
+/// How far past the playhead a pre-built word may start and still be shown.
+const PREBUILT_LOOKAHEAD_MS: u64 = 300;
+
 /// Sentence-ending punctuation; a word ending in one of these finalizes.
 const SENTENCE_END: &[char] = &['.', '?', '!', '。', '！', '？', '…'];
 
@@ -42,6 +49,20 @@ const SENTENCE_END: &[char] = &['.', '?', '!', '。', '！', '？', '…'];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MediaInfo {
     pub duration_ms: u64,
+}
+
+/// One finalized pre-built caption card, with the translation slot filled
+/// in by the translation worker during the batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrebuiltCard {
+    /// Media-timeline start of the first word of the sentence.
+    start_ms: u64,
+    /// Media-timeline end of the last word of the sentence.
+    end_ms: u64,
+    /// Source-language sentence.
+    source: String,
+    /// English translation once the worker delivered it.
+    translation: Option<String>,
 }
 
 /// Live-caption player state.
@@ -75,19 +96,34 @@ pub struct Session {
     pub current_card: String,
     /// Latest translated sentence (English).
     pub translated_text: String,
+    /// A full-file batch transcription is being built (see the player's
+    /// pre-transcribe button); words are routed here instead of the live line.
+    pub prebuilding: bool,
+    /// The batch finished; captions come from `prebuilt` (and `prebuilt_cards`
+    /// when translating), with no whisper latency.
+    pub prebuilt_ready: bool,
+    /// Batch words on the media timeline, in decode (≈ timeline) order.
+    prebuilt: Vec<WordToken>,
+    /// Batch sentences, in finalization order, with translation slots.
+    prebuilt_cards: Vec<PrebuiltCard>,
     /// Words still accumulating into the live line.
     live_words: VecDeque<WordToken>,
     last_word_end_ms: u64,
 }
 
 impl Session {
-    /// A video was opened; resets playback and captions.
+    /// A video was opened; resets playback, captions, and the pre-built
+    /// transcript (it belongs to the previous media).
     pub fn open_video(&mut self, title: impl Into<String>, duration_ms: u64) {
         self.file_title = title.into();
         self.video = Some(MediaInfo { duration_ms });
         self.playing = false;
         self.playhead_ms = 0;
         self.clear_captions();
+        self.prebuilding = false;
+        self.prebuilt_ready = false;
+        self.prebuilt.clear();
+        self.prebuilt_cards.clear();
     }
 
     /// Duration of the opened media, or zero.
@@ -113,9 +149,18 @@ impl Session {
 
     /// Feeds recognized words into the live line, returning the finalized
     /// sentences (usually zero or one) that should be translated.
+    ///
+    /// During a batch pre-transcription the words feed the pre-built
+    /// transcript instead, and the finalized sentences are recorded as timed
+    /// cards so their translations can be shown during playback.
     pub fn feed_words(&mut self, words: Vec<WordToken>) -> Vec<String> {
         let mut finalized = Vec::new();
         for word in words {
+            if self.prebuilding {
+                // Keep a full-timeline copy for the pre-built display; the
+                // live line below does the sentence segmentation.
+                self.prebuilt.push(word.clone());
+            }
             if !self.live_words.is_empty()
                 && word.start_ms.saturating_sub(self.last_word_end_ms) >= FINALIZE_GAP_MS
             {
@@ -140,12 +185,31 @@ impl Session {
     }
 
     /// Finalizes the live line into `current_card`, collecting non-empty
-    /// sentences into `finalized`.
+    /// sentences into `finalized`; during a batch the sentence is also
+    /// recorded as a timed card for translation.
     fn finalize_into(&mut self, finalized: &mut Vec<String>) {
+        let start_ms = self
+            .live_words
+            .front()
+            .map(|word| word.start_ms)
+            .unwrap_or(0);
+        let end_ms = self
+            .live_words
+            .back()
+            .map(|word| word.end_ms)
+            .unwrap_or(start_ms);
         let text = self.live_text();
         self.live_words.clear();
         if text.is_empty() {
             return;
+        }
+        if self.prebuilding {
+            self.prebuilt_cards.push(PrebuiltCard {
+                start_ms,
+                end_ms,
+                source: text.clone(),
+                translation: None,
+            });
         }
         self.current_card = text.clone();
         finalized.push(text);
@@ -162,7 +226,15 @@ impl Session {
     }
 
     /// Recomputes the overlay text; call every pump tick (playhead moves).
+    ///
+    /// Once a batch transcript is ready it wins over the live line: words
+    /// are looked up on the timeline directly, so captions (and their
+    /// translations) appear instantly with no whisper latency.
     pub fn refresh_caption(&mut self, playhead_ms: u64) {
+        if self.prebuilt_ready {
+            self.caption_text = self.prebuilt_caption(playhead_ms);
+            return;
+        }
         let keep_from = playhead_ms.saturating_sub(LIVE_WINDOW_MS);
         while self
             .live_words
@@ -185,6 +257,96 @@ impl Session {
         } else {
             self.current_card.clone()
         };
+    }
+
+    /// Overlay text from the batch transcript at `playhead_ms`.
+    ///
+    /// Subtitle-style: the sentence covering the playhead, translated when
+    /// enabled (source until the translation arrives). Before the first
+    /// card, in inter-card gaps, and for a while after a card ends it falls
+    /// back to the rolling word line.
+    fn prebuilt_caption(&self, playhead_ms: u64) -> String {
+        let index = self
+            .prebuilt_cards
+            .partition_point(|card| card.start_ms <= playhead_ms)
+            .saturating_sub(1);
+        if let Some(card) = self.prebuilt_cards.get(index)
+            && playhead_ms <= card.end_ms.saturating_add(PREBUILT_LINGER_MS)
+        {
+            if self.translate_enabled
+                && let Some(translated) = &card.translation
+            {
+                return translated.clone();
+            }
+            return card.source.clone();
+        }
+        self.prebuilt_word_line(playhead_ms)
+    }
+
+    /// The rolling word line: words finished within the linger window and
+    /// not starting more than a lookahead ahead of the playhead.
+    fn prebuilt_word_line(&self, playhead_ms: u64) -> String {
+        let keep_from = playhead_ms.saturating_sub(PREBUILT_LINGER_MS);
+        let lookahead = playhead_ms.saturating_add(PREBUILT_LOOKAHEAD_MS);
+        let mut text = String::new();
+        for word in &self.prebuilt {
+            if word.end_ms < keep_from {
+                continue;
+            }
+            if word.start_ms > lookahead {
+                break; // sorted by timeline; nothing later qualifies
+            }
+            join_word(&mut text, &word.text);
+        }
+        text
+    }
+
+    /// The batch transcript is cleared for a fresh run (cards included).
+    pub fn prebuilt_clear_for_batch(&mut self) {
+        self.prebuilt.clear();
+        self.prebuilt_cards.clear();
+    }
+
+    /// The batch finished: sort and dedupe the words (live and batch words
+    /// can interleave when play started mid-build) and switch the display to
+    /// the pre-built timeline.
+    pub fn mark_prebuilt_ready(&mut self) {
+        self.prebuilding = false;
+        self.prebuilt_ready = true;
+        self.prebuilt.sort_by_key(|word| word.start_ms);
+        self.prebuilt
+            .dedup_by(|a, b| a.start_ms == b.start_ms && a.end_ms == b.end_ms && a.text == b.text);
+    }
+
+    /// Attaches an English translation to the oldest pre-built card that
+    /// still lacks one (worker results arrive in submission order).
+    pub fn attach_prebuilt_translation(&mut self, text: String) {
+        if let Some(card) = self
+            .prebuilt_cards
+            .iter_mut()
+            .find(|card| card.translation.is_none())
+        {
+            card.translation = Some(text);
+        }
+    }
+
+    /// Whether any pre-built card still waits for its translation.
+    pub fn has_untranslated_cards(&self) -> bool {
+        self.prebuilt_cards
+            .iter()
+            .any(|card| card.translation.is_none())
+    }
+
+    /// Whether every pre-built card has its translation.
+    pub fn translations_done(&self) -> bool {
+        self.prebuilt_cards
+            .iter()
+            .all(|card| card.translation.is_some())
+    }
+
+    /// Word count on the pre-built timeline (for the status line).
+    pub fn prebuilt_word_count(&self) -> usize {
+        self.prebuilt.len()
     }
 
     /// Stores a translation of the latest finalized card.
@@ -396,6 +558,92 @@ mod tests {
         assert!(!session.playing);
         assert_eq!(session.duration_ms(), 60_000);
         assert_eq!(session.caption_text, "");
+    }
+
+    #[test]
+    fn batch_words_feed_the_prebuilt_timeline_and_cards() {
+        let mut session = Session {
+            prebuilding: true,
+            ..Session::default()
+        };
+        // Two sentences plus a trailing partial line.
+        let sentences = session.feed_words(vec![
+            word("Hallo", 0),
+            word("Welt.", 300),
+            word("Wie", 1_500),
+            word("geht", 1_800),
+            word("es?", 2_100),
+            word("Mir", 3_500),
+        ]);
+        assert_eq!(sentences, ["Hallo Welt.", "Wie geht es?"]);
+        assert_eq!(
+            session.prebuilt.len(),
+            6,
+            "every word lands on the timeline"
+        );
+        assert_eq!(session.prebuilt_cards.len(), 2);
+        assert_eq!(session.prebuilt_cards[0].start_ms, 0);
+        assert_eq!(session.prebuilt_cards[1].start_ms, 1_500);
+    }
+
+    #[test]
+    fn prebuilt_captions_are_instant_at_the_playhead() {
+        let mut session = Session {
+            prebuilding: true,
+            ..Session::default()
+        };
+        session.feed_words(vec![
+            word("Hallo", 0),
+            word("Welt.", 300),
+            word("Wie", 1_500),
+            word("geht", 1_800),
+            word("es?", 2_100),
+        ]);
+        session.mark_prebuilt_ready();
+
+        session.refresh_caption(400);
+        assert_eq!(session.caption_text, "Hallo Welt.");
+        // Straight to the next sentence the moment it starts; no whisper lag.
+        session.refresh_caption(1_600);
+        assert_eq!(session.caption_text, "Wie geht es?");
+        // Words finish their 3 s linger, then the overlay empties.
+        session.refresh_caption(6_000);
+        assert!(session.caption_text.is_empty());
+    }
+
+    #[test]
+    fn translating_during_the_batch_replaces_cards_at_their_times() {
+        let mut session = Session {
+            prebuilding: true,
+            translate_enabled: true,
+            ..Session::default()
+        };
+        session.feed_words(vec![
+            word("Hallo", 0),
+            word("Welt.", 300),
+            word("Wie", 1_500),
+            word("geht", 1_800),
+            word("es?", 2_100),
+        ]);
+        session.attach_prebuilt_translation("Hello world.".to_owned());
+        session.attach_prebuilt_translation("How are you?".to_owned());
+        session.mark_prebuilt_ready();
+
+        session.refresh_caption(400);
+        assert_eq!(session.caption_text, "Hello world.");
+        session.refresh_caption(1_600);
+        assert_eq!(session.caption_text, "How are you?");
+
+        // Untranslated cards fall back to the source sentence.
+        let mut session = Session {
+            prebuilding: true,
+            translate_enabled: true,
+            ..Session::default()
+        };
+        session.feed_words(vec![word("Hallo", 0), word("Welt.", 300)]);
+        session.mark_prebuilt_ready();
+        session.refresh_caption(400);
+        assert_eq!(session.caption_text, "Hallo Welt.");
     }
 
     #[test]

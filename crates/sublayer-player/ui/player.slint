@@ -27,6 +27,7 @@ export component PlayerWindow inherits Window {
     in property <int> language_index: 0;
 
     callback open_clicked();
+    callback pre_transcribe_clicked();
     callback play_toggled();
     callback stop_clicked();
     callback seek_by(int);
@@ -73,6 +74,11 @@ export component PlayerWindow inherits Window {
             }
             Rectangle { width: 4px; }
             Button { text: "Open…"; clicked => { root.open_clicked(); } }
+            Button {
+                text: "Pre-transcribe";
+                enabled: root.can_seek;
+                clicked => { root.pre_transcribe_clicked(); }
+            }
             ComboBox {
                 model: root.models;
                 current-index: root.model_index;
