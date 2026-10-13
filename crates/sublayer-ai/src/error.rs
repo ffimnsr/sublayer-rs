@@ -7,7 +7,7 @@ use std::path::PathBuf;
 pub enum AiError {
     /// The requested model is not in the known-model table.
     #[error(
-        "unknown model `{0}`; known models: tiny, tiny.en, base, base.en, small, small.en, large-v3-turbo"
+        "unknown model `{0}`; known models: tiny, base, small, large-v3-turbo, tiny.en, base.en, small.en"
     )]
     UnknownModel(String),
 

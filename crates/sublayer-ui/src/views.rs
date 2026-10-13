@@ -70,7 +70,7 @@ pub(crate) fn install_static_options(ui: &MainWindow) {
         .collect();
     let default_index = names
         .iter()
-        .position(|name| name.as_str() == "base.en")
+        .position(|name| name.as_str() == "base")
         .unwrap_or(0) as i32;
     ui.set_model_names(ModelRc::new(VecModel::from(names)));
     ui.set_model_index(default_index);

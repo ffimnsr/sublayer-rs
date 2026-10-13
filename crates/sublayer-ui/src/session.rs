@@ -165,7 +165,7 @@ impl Default for Session {
             playing: false,
             scroll_ms: 0,
             pixels_per_second: DEFAULT_PIXELS_PER_SECOND,
-            model_name: "base.en".to_owned(),
+            model_name: "base".to_owned(),
             use_gpu: false,
             enable_vad: true,
             preset_index: 0,

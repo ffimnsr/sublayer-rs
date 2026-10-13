@@ -109,7 +109,7 @@ pub async fn run_audio_driver(
                         consumed = 0;
                         started_at = None;
                         helper = AudioHelper::spawn(&events, &volume, &muted).await;
-                        if let Err(error) = stream_pcm_s16le(
+                        match stream_pcm_s16le(
                             &video,
                             Some(offset_ms),
                             OUTPUT_RATE,
@@ -117,11 +117,15 @@ pub async fn run_audio_driver(
                         )
                         .await
                         {
-                            let _ = events.send(AudioEvent::Log(format!(
-                                "audio decode failed: {error}"
-                            )));
-                        } else {
-                            started_at = Some(Instant::now());
+                            Ok(stream) => {
+                                speaker = Some(stream);
+                                started_at = Some(Instant::now());
+                            }
+                            Err(error) => {
+                                let _ = events.send(AudioEvent::Log(format!(
+                                    "audio decode failed: {error}"
+                                )));
+                            }
                         }
                     }
                     Some(AudioCommand::Seek { offset_ms }) => {
@@ -130,7 +134,7 @@ pub async fn run_audio_driver(
                         speaker = None;
                         consumed = 0;
                         started_at = None;
-                        if let Err(error) = stream_pcm_s16le(
+                        match stream_pcm_s16le(
                             &video,
                             Some(offset_ms),
                             OUTPUT_RATE,
@@ -138,11 +142,15 @@ pub async fn run_audio_driver(
                         )
                         .await
                         {
-                            let _ = events.send(AudioEvent::Log(format!(
-                                "audio decode failed: {error}"
-                            )));
-                        } else {
-                            started_at = Some(Instant::now());
+                            Ok(stream) => {
+                                speaker = Some(stream);
+                                started_at = Some(Instant::now());
+                            }
+                            Err(error) => {
+                                let _ = events.send(AudioEvent::Log(format!(
+                                    "audio decode failed: {error}"
+                                )));
+                            }
                         }
                     }
                     Some(AudioCommand::SetVolume(percent)) => {
@@ -423,7 +431,61 @@ fn to_s16le(samples: &[f32], gain: f32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+    use std::process::Stdio;
+
+    use tokio::process::Command;
+    use tokio::sync::mpsc;
+
     use super::*;
+
+    /// Generates a short sine-wave WAV fixture; skips when ffmpeg is
+    /// unavailable.
+    async fn fixture(path: &Path, seconds: u32) -> bool {
+        let Ok(program) = which::which("ffmpeg") else {
+            return false;
+        };
+        Command::new(program)
+            .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440"])
+            .args(["-t", &seconds.to_string()])
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .is_ok_and(|status| status.success())
+    }
+
+    #[tokio::test]
+    async fn driver_consumes_the_pipe_to_eof_after_start() {
+        // Regression: the `Start` arm used to open the decode pipe without
+        // storing it, so the driver never consumed anything — playback was
+        // silent forever and `Ended` never arrived.
+        let directory = tempfile::tempdir().unwrap();
+        let audio = directory.path().join("tone.wav");
+        if !fixture(&audio, 2).await {
+            eprintln!("skipping: ffmpeg could not generate the fixture");
+            return;
+        }
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        tokio::spawn(run_audio_driver(audio, 100, false, command_rx, event_tx));
+        command_tx
+            .send(AudioCommand::Start { offset_ms: 0 })
+            .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(250), event_rx.recv()).await {
+                Ok(Some(AudioEvent::Ended)) => return,
+                Ok(Some(AudioEvent::Log(message))) => eprintln!("audio log: {message}"),
+                Ok(None) => break,
+                Err(_) => continue,
+            }
+        }
+        panic!("the driver never reached EOF; the decode pipe was not consumed");
+    }
 
     #[test]
     fn helper_candidates_cover_pipewire_pulse_and_alsa_in_order() {

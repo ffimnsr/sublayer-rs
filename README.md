@@ -68,9 +68,10 @@ video ──▶ ffprobe ──▶ 16 kHz audio ──▶ Whisper (VAD + word tim
 | GPU | optional: Vulkan for Whisper, VA-API/NVENC for encoding, `--device=dri` when sandboxed |
 
 Whisper models are downloaded on demand into `$XDG_DATA_HOME/sublayer/models/`
-and verified against pinned SHA-256 digests. Pinned names: `tiny`, `tiny.en`,
-`base`, `base.en`, `small`, `small.en`, `large-v3-turbo` (the multilingual
-variants are the ones to pair with translation).
+and verified against pinned SHA-256 digests. Pinned names: `tiny`, `base`,
+`small`, `large-v3-turbo`, then the English-only `tiny.en`, `base.en`,
+`small.en` (the multilingual variants are the ones to pair with
+translation and are the UI default).
 
 ## Build and run
 
