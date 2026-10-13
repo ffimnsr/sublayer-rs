@@ -53,7 +53,7 @@ export component PlayerWindow inherits Window {
             if (event.text == Key.Space) { root.play_toggled(); accept }
             else if (event.text == Key.LeftArrow) { root.seek_by(-5000); accept }
             else if (event.text == Key.RightArrow) { root.seek_by(5000); accept }
-            else if (event.text == Key.UpArrow) { root.volume_changed(Math.min(100, root.volume + 10)); accept }
+            else if (event.text == Key.UpArrow) { root.volume_changed(Math.min(150, root.volume + 10)); accept }
             else if (event.text == Key.DownArrow) { root.volume_changed(Math.max(0, root.volume - 10)); accept }
             else if (event.text == Key.M) { root.mute_toggled(); accept }
             else if (event.text == Key.F) { root.fullscreen_toggled(); accept }
@@ -194,7 +194,7 @@ export component PlayerWindow inherits Window {
             }
             Slider {
                 minimum: 0;
-                maximum: 100;
+                maximum: 150;
                 value: root.volume;
                 width: 120px;
                 changed(value) => { root.volume_changed(value); }

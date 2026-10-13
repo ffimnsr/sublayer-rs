@@ -123,7 +123,9 @@ pub async fn run_audio_driver(
                         }
                     }
                     Some(AudioCommand::SetVolume(percent)) => {
-                        let scaled = u32::from(percent).saturating_mul(10).min(1_000);
+                        // The slider runs 0..=150 %: unity at 100, boost past
+                        // it (peaks clip in `to_s16le`).
+                        let scaled = u32::from(percent).saturating_mul(10).min(1_500);
                         volume.store(scaled, Ordering::Relaxed);
                     }
                     Some(AudioCommand::SetMute(mute)) => {
@@ -413,7 +415,8 @@ impl AudioHelper {
     }
 }
 
-/// Mute takes precedence over the volume knob; returns `0.0..=1.0`.
+/// Mute takes precedence over the volume knob; returns `0.0..=1.5` (the
+/// slider runs to 150 % for boost past unity).
 fn gain_for(volume: &AtomicU32, muted: &AtomicBool) -> f32 {
     if muted.load(Ordering::Relaxed) {
         0.0
@@ -501,6 +504,22 @@ mod tests {
         muted.store(false, Ordering::Relaxed);
         volume.store(250, Ordering::Relaxed);
         assert_eq!(gain_for(&volume, &muted), 0.25);
+    }
+
+    #[test]
+    fn volume_boost_scales_past_unity() {
+        // The slider runs to 150 % so increasing the volume is always
+        // audible; peaks clip in the s16 conversion.
+        let volume = AtomicU32::new(1_500);
+        let muted = AtomicBool::new(false);
+        assert_eq!(gain_for(&volume, &muted), 1.5);
+
+        let peak = to_s16le(&[1.0], 1.5);
+        assert_eq!(
+            i16::from_le_bytes([peak[0], peak[1]]),
+            32_767,
+            "boosted peaks clamp to the i16 range"
+        );
     }
 
     #[test]

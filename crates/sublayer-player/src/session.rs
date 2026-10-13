@@ -77,6 +77,7 @@ pub struct Session {
     /// Transport state.
     pub playing: bool,
     pub playhead_ms: u64,
+    /// Playback volume in percent `0..=150` (100 = unity, above = boost).
     pub volume_percent: u8,
     pub muted: bool,
     /// Whisper model name (see `sublayer_ai::MODELS`).

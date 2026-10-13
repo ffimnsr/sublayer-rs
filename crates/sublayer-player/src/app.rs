@@ -177,7 +177,8 @@ impl App {
         let session = self.session.clone();
         self.ui.on_volume_changed(move |percent| {
             let Some(ui) = weak.upgrade() else { return };
-            let percent = percent.clamp(0.0, 100.0) as u8;
+            // 0..=150 %: unity at 100, boost past it (peaks clip).
+            let percent = percent.clamp(0.0, 150.0) as u8;
             session.borrow_mut().volume_percent = percent;
             bridge.set_volume(percent);
             ui.set_volume(f32::from(percent));
