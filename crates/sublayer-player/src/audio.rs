@@ -133,7 +133,10 @@ pub async fn run_audio_driver(
                 }
 
                 // ASR pipe: 16 kHz mono, read up to the realtime position.
-                let asr_target = elapsed_ms * 16 / 10;
+                // 16 000 Hz / 1 000 ms = 16 samples per millisecond; a
+                // fractional factor would feed whisper at a fraction of
+                // realtime and no window would ever fill during a clip.
+                let asr_target = elapsed_ms * 16;
                 let asr_take = asr_target.saturating_sub(consumed_asr);
                 if asr_take > 0 {
                     let mut samples = vec![0.0_f32; asr_take as usize];

@@ -289,7 +289,7 @@ pub(crate) fn pump(
     refresh(&ui, session);
 }
 
-fn handle_event(
+pub(crate) fn handle_event(
     ui: &PlayerWindow,
     bridge: &Bridge,
     session: &Rc<RefCell<Session>>,
@@ -495,4 +495,19 @@ fn open_video_dialog() -> Option<std::path::PathBuf> {
     rfd::FileDialog::new()
         .add_filter("video", &["mp4", "mkv", "webm", "mov", "avi", "m4v", "ts"])
         .pick_file()
+}
+
+#[cfg(test)]
+impl App {
+    /// Drives one pump tick on the real wiring (playhead, video decoder,
+    /// event drain, caption refresh) without a running event loop.
+    pub(crate) fn pump_for_test(&self, last_pump: &Rc<Cell<Instant>>) {
+        let weak = self.ui.as_weak();
+        pump(&weak, &self.bridge, &self.session, &self.events, last_pump);
+    }
+
+    /// Opens `path` through the real bridge (probe + orchestrator).
+    pub(crate) fn open_for_test(&self, path: std::path::PathBuf) {
+        self.bridge.open_video(path);
+    }
 }

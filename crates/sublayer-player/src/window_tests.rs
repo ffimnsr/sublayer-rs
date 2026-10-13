@@ -5,6 +5,8 @@
 //! tests never need a Wayland or X11 session.
 
 use std::cell::Cell;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use i_slint_backend_testing as testing;
 use slint::Model;
@@ -113,6 +115,102 @@ fn seek_buttons_do_not_double_borrow_the_session() {
     ui.invoke_seek_by(5_000);
     ui.invoke_seek_by(5_000);
     assert_eq!(ui.get_playhead_ms(), 10_000);
+}
+
+#[test]
+fn caption_words_reach_the_overlay_while_playing() {
+    ensure_platform();
+    let app = App::new().expect("testing backend must build the window");
+    let ui = &app.ui_for_test();
+    let session = app.session_for_test();
+    session.borrow_mut().open_video("clip.mp4", 60_000);
+    session.borrow_mut().playing = true;
+
+    // The live-ASR path: recognized words arrive as player events and must
+    // land in the overlay text while playback is running.
+    let bridge = crate::bridge::Bridge::new(crossbeam_channel::unbounded().0);
+    crate::app::handle_event(
+        ui,
+        &bridge,
+        session,
+        crate::bridge::PlayerEvent::Words(vec![sublayer_core::WordToken::new(
+            "Hello", 1_000, 1_300,
+        )]),
+    );
+    assert!(ui.get_caption_text().as_str().contains("Hello"));
+
+    // The pump's own refresh (every tick) keeps the overlay populated;
+    // words inside the whisper-latency window survive.
+    session.borrow_mut().refresh_caption(8_000);
+    app.refresh_for_test();
+    assert!(ui.get_caption_text().as_str().contains("Hello"));
+}
+
+#[test]
+fn live_captions_flow_end_to_end_with_a_real_video() {
+    ensure_platform();
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_assets/player-test.webm");
+    if !fixture.is_file() {
+        eprintln!("skipping: test_assets/player-test.webm not present");
+        return;
+    }
+
+    let app = App::new().expect("testing backend must build the window");
+    let ui = &app.ui_for_test();
+    let session = app.session_for_test();
+    // The multilingual tiny model is cached locally; the default tiny.en is
+    // not and would trigger a download mid-test.
+    session.borrow_mut().model = "tiny".to_owned();
+    session.borrow_mut().language = Some("en".to_owned());
+    app.refresh_for_test();
+
+    app.open_for_test(fixture);
+    // Pre-drain: the probe result must arrive like in production.
+    let last_pump = Rc::new(Cell::new(Instant::now()));
+    let drain_deadline = Instant::now() + Duration::from_secs(15);
+    let mut opened = false;
+    while Instant::now() < drain_deadline {
+        app.pump_for_test(&last_pump);
+        if ui.get_can_seek() {
+            opened = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    eprintln!("opened: {opened}, status: {}", ui.get_status());
+    app.toggle_play_for_test();
+
+    // Drive the real pump loop until whisper delivers words; the caption
+    // pipeline is live (ffmpeg audio decode, VAD, whisper on its own
+    // thread, event drain into the overlay).
+    let last_pump = Rc::new(Cell::new(Instant::now()));
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut last_status = String::new();
+    loop {
+        app.pump_for_test(&last_pump);
+        let caption = ui.get_caption_text().to_string();
+        if !caption.trim().is_empty() {
+            eprintln!(
+                "captions appeared at {} ms: {caption:?}",
+                ui.get_playhead_ms()
+            );
+            return;
+        }
+        let status = ui.get_status().to_string();
+        if status != last_status && !status.is_empty() {
+            last_status = status.clone();
+            eprintln!("status: {status}");
+        }
+        if Instant::now() > deadline {
+            panic!(
+                "no captions within 120 s; status: {status:?}, playhead: {} ms, playing: {}",
+                ui.get_playhead_ms(),
+                ui.get_playing()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// Test-only accessors; the production API never exposes the window.

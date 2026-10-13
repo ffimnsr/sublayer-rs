@@ -4,4 +4,5 @@
 !/README.md
 /.ee.toml
 /packaging/appimage/AppDir/
-/test_assets/
+/test_assets/*.mp4
+/test_assets/*.ass

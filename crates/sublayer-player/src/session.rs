@@ -28,7 +28,12 @@ pub const PLAYER_LANGUAGES: &[(&str, Option<&str>)] = &[
 const FINALIZE_GAP_MS: u64 = 900;
 
 /// Words older than this (relative to the playhead) leave the rolling line.
-const LIVE_WINDOW_MS: u64 = 5_000;
+///
+/// Sized for whisper latency: words land seconds after they were spoken
+/// (a 4 s ASR window plus decode time), so the window must comfortably
+/// cover capture + decode + a readable linger; 12 s keeps a slow model's
+/// captions visible instead of pruning them before display.
+const LIVE_WINDOW_MS: u64 = 12_000;
 
 /// Sentence-ending punctuation; a word ending in one of these finalizes.
 const SENTENCE_END: &[char] = &['.', '?', '!', '。', '！', '？', '…'];
@@ -300,9 +305,24 @@ mod tests {
     fn stale_live_words_drop_out_of_the_window() {
         let mut session = Session::default();
         session.feed_words(vec![word("old", 0), word("new", 8_000)]);
-        session.refresh_caption(10_000);
+        session.refresh_caption(15_000);
         assert!(!session.caption_text.contains("old"));
         assert!(session.caption_text.contains("new"));
+    }
+
+    #[test]
+    fn words_survive_whisper_latency_while_playing() {
+        // Whisper emits words seconds after capture: a word spoken at 0 ms
+        // lands at the playhead around 5-8 s on a slow model and must still
+        // be on screen, not pruned by the live window.
+        let mut session = Session::default();
+        session.feed_words(vec![word("spoken", 0), word("early", 300)]);
+        session.refresh_caption(6_000);
+        assert_eq!(session.caption_text, "spoken early");
+        session.refresh_caption(11_000);
+        assert_eq!(session.caption_text, "spoken early");
+        session.refresh_caption(13_000);
+        assert!(session.caption_text.is_empty());
     }
 
     #[test]

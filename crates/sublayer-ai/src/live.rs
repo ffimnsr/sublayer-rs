@@ -204,12 +204,11 @@ impl LiveTranscriber {
         if samples.is_empty() {
             return Ok(Vec::new());
         }
-        let chunk_start_ms = self.media_offset_ms + samples_ms(self.buffer.len());
         self.buffer.extend_from_slice(samples);
 
         let mut words = Vec::new();
         if self.config.enable_vad {
-            if let Some(onset_ms) = self.track_speech(samples, chunk_start_ms) {
+            if let Some(onset_ms) = self.track_speech() {
                 // Speech starts mid-silence: skip the silent prefix so the
                 // first decode begins at the voice onset.
                 let drop_to = samples_at(onset_ms.saturating_sub(self.media_offset_ms))
@@ -221,11 +220,14 @@ impl LiveTranscriber {
                     // A speech span just ended: flush its tail as one window.
                     self.saw_speech = false;
                     words.extend(self.flush_tail()?);
-                } else {
-                    // Pure silence: never hand it to whisper; drop it as it
-                    // arrives so quiet stretches cannot grow the buffer.
+                } else if self.silent_unprocessed_ms() >= VAD_SILENCE_MS {
+                    // Certainly silence: never hand it to whisper; drop it as
+                    // it arrives so quiet stretches cannot grow the buffer.
                     self.consumed = self.buffer.len();
                 }
+                // Shorter silent runs stay buffered: a speech span below the
+                // VAD blip floor may still be accumulating (the player feeds
+                // audio in ~20 ms pieces).
             }
         } else {
             self.speech_active = true;
@@ -290,27 +292,44 @@ impl LiveTranscriber {
         self.buffer.len() - self.consumed
     }
 
-    /// Updates the VAD state from a fresh chunk (spans are relative to
-    /// `chunk_start_ms`). Returns the media-timeline start of a speech span
-    /// that just began, so the caller can skip the silent prefix before it.
-    fn track_speech(&mut self, chunk: &[f32], chunk_start_ms: u64) -> Option<u64> {
-        let spans = detect_speech(chunk, WHISPER_SAMPLE_RATE, &VadConfig::default());
-        if let Some(last) = spans.last() {
-            let onset = if self.saw_speech {
-                None
-            } else {
-                self.saw_speech = true;
-                Some(chunk_start_ms + spans.first().expect("spans is not empty").start_ms)
-            };
-            self.speech_active = true;
-            self.last_speech_end_ms = chunk_start_ms + last.end_ms;
-            return onset;
-        }
-        let now = chunk_start_ms + samples_ms(chunk.len());
-        if self.speech_active && now.saturating_sub(self.last_speech_end_ms) >= VAD_SILENCE_MS {
-            self.speech_active = false;
-        }
-        None
+    /// Milliseconds of unprocessed audio with no speech span in it; used to
+    /// decide when a silent run is certainly silence.
+    fn silent_unprocessed_ms(&self) -> u64 {
+        samples_ms(self.buffer.len().saturating_sub(self.consumed))
+    }
+
+    /// Updates the VAD state over the *accumulated* unprocessed audio.
+    ///
+    /// Classifying each incoming chunk alone would drop every span: the
+    /// player feeds audio in ~20 ms pieces, all below the 200 ms blip floor
+    /// of [`detect_speech`]. Returns the media-timeline start of a speech
+    /// span that just became certain, so the caller can skip the silent
+    /// prefix before it.
+    fn track_speech(&mut self) -> Option<u64> {
+        let base = self.media_offset_ms + samples_ms(self.consumed);
+        let spans = detect_speech(
+            &self.buffer[self.consumed..],
+            WHISPER_SAMPLE_RATE,
+            &VadConfig::default(),
+        );
+        let Some(first) = spans.first() else {
+            // No speech in the unprocessed part; a run this long without a
+            // span ends the speech that just finished (the caller flushes
+            // its tail).
+            if self.silent_unprocessed_ms() >= VAD_SILENCE_MS {
+                self.speech_active = false;
+            }
+            return None;
+        };
+        let onset = if self.saw_speech {
+            None
+        } else {
+            self.saw_speech = true;
+            Some(base + first.start_ms)
+        };
+        self.speech_active = true;
+        self.last_speech_end_ms = base + spans.last().expect("spans is not empty").end_ms;
+        onset
     }
 
     /// Decodes (or drops) the audio between the frontier and the buffer end:
@@ -630,6 +649,41 @@ mod tests {
         let words = transcriber.push(&tone(0.0, 500)).unwrap();
         assert!(words.is_empty(), "tail below the flush floor is dropped");
         assert_eq!(transcriber.unprocessed_len(), 0);
+    }
+
+    #[test]
+    fn speech_in_sub_blip_chunks_still_decodes() {
+        // Streaming pushes arrive in pieces far below the VAD's 200 ms blip
+        // floor; classification must run over the accumulated buffer or no
+        // span is ever confirmed (regression: the player feeds ~20 ms
+        // chunks and produced no captions).
+        let mut transcriber = live(config());
+        let mut decoded = 0;
+        for _ in 0..10 {
+            decoded += transcriber.push(&tone(0.1, 100)).unwrap().len();
+        }
+        assert_eq!(
+            decoded, 1,
+            "1 s of speech in 100 ms pieces decodes one window"
+        );
+
+        // The span then ends on the certainty rule like a real gap.
+        let words = transcriber.push(&tone(0.0, 500)).unwrap();
+        assert_eq!(words.len(), 1, "speech end flushes the tail");
+        assert_eq!(words[0].start_ms, 1_000);
+        assert_eq!(words[0].end_ms, 1_500);
+    }
+
+    #[test]
+    fn short_silent_runs_keep_buffering_toward_a_span() {
+        // Two 100 ms speech pieces are each below the blip floor; the second
+        // push must not discard the first as silence.
+        let mut transcriber = live(config());
+        transcriber.push(&tone(0.1, 100)).unwrap();
+        transcriber.push(&tone(0.1, 100)).unwrap();
+        let words = transcriber.push(&tone(0.1, 800)).unwrap();
+        assert_eq!(words.len(), 1, "the accumulated span decodes");
+        assert_eq!(words[0].start_ms, 0);
     }
 
     #[test]
