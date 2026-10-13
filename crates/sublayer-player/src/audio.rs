@@ -375,12 +375,13 @@ impl AudioHelper {
 
     /// Converts `samples` to s16le (applying `gain`) and writes the bytes to
     /// the helper's stdin; errors mean the helper (or sound server) died.
+    ///
+    /// The helper is always fed, even when muted or the volume is zero:
+    /// skipping the write starves its stdin, and the helper (or the sound
+    /// server behind it) gives up — silence keeps the pipe and the realtime
+    /// clock alive.
     async fn write(&mut self, samples: &[f32]) -> std::io::Result<()> {
         let gain = gain_for(&self.volume, &self.muted);
-        if gain == 0.0 {
-            // Muted: skip the write; the helper idles on an empty stdin.
-            return Ok(());
-        }
         let bytes = to_s16le(samples, gain);
         self.stdin.write_all(&bytes).await
     }
@@ -474,5 +475,15 @@ mod tests {
         muted.store(false, Ordering::Relaxed);
         volume.store(250, Ordering::Relaxed);
         assert_eq!(gain_for(&volume, &muted), 0.25);
+    }
+
+    #[test]
+    fn muted_or_zero_volume_still_produces_writable_silence() {
+        // The helper must be fed silence instead of being starved, or it
+        // (or the sound server) gives up and sound is lost for the rest of
+        // the playback.
+        let samples = [-1.0, 0.0, 1.0];
+        let bytes = to_s16le(&samples, 0.0);
+        assert_eq!(bytes, vec![0; 6], "zero gain must emit digital silence");
     }
 }

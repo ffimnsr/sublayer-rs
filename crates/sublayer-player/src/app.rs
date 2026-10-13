@@ -130,12 +130,11 @@ impl App {
         let session = self.session.clone();
         self.ui.on_seek_by(move |delta_ms| {
             let Some(ui) = weak.upgrade() else { return };
-            apply_seek(
-                &ui,
-                &bridge,
-                &session,
-                session.borrow().playhead_ms as i64 + i64::from(delta_ms),
-            );
+            // Bind the target first: the temporary `Ref` from `borrow()`
+            // would otherwise live until `apply_seek` returns, and its
+            // `borrow_mut()` would panic with a double borrow.
+            let target = session.borrow().playhead_ms as i64 + i64::from(delta_ms);
+            apply_seek(&ui, &bridge, &session, target);
         });
 
         let weak = self.ui.as_weak();

@@ -96,6 +96,25 @@ fn play_without_a_video_hints_in_the_status_line() {
     );
 }
 
+#[test]
+fn seek_buttons_do_not_double_borrow_the_session() {
+    ensure_platform();
+    let app = App::new().expect("testing backend must build the window");
+    let ui = &app.ui_for_test();
+    app.session_for_test()
+        .borrow_mut()
+        .open_video("clip.mp4", 60_000);
+    app.refresh_for_test();
+
+    // Regression: the `seek_by` callback used to pass `session.borrow()`
+    // into `apply_seek`, whose `borrow_mut` then panicked with a live
+    // immutable borrow (fast-forward/backward buttons and the arrow keys).
+    ui.invoke_seek_by(-5_000);
+    ui.invoke_seek_by(5_000);
+    ui.invoke_seek_by(5_000);
+    assert_eq!(ui.get_playhead_ms(), 10_000);
+}
+
 /// Test-only accessors; the production API never exposes the window.
 impl App {
     pub(crate) fn ui_for_test(&self) -> &PlayerWindow {
