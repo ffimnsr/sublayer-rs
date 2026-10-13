@@ -40,6 +40,10 @@ impl App {
         let bridge = Bridge::new(event_tx);
         let session = Rc::new(RefCell::new(Session::default()));
         session.borrow_mut().model = MODELS[0].name.to_owned();
+        // The volume slider is the one source of truth once touched; with a
+        // derived default of 0% any interaction would mute playback, so the
+        // player boots at full volume matching the driver's own default.
+        session.borrow_mut().volume_percent = 100;
 
         install_static_options(&ui, &session);
 

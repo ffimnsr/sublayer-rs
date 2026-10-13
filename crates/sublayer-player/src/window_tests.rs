@@ -59,6 +59,17 @@ fn window_builds_with_the_static_option_lists() {
 }
 
 #[test]
+fn fresh_app_boots_at_full_volume() {
+    ensure_platform();
+    let app = App::new().expect("testing backend must build the window");
+    // A 0% default made the volume slider look mute and any interaction
+    // with it silenced playback (the driver only learns the slider value
+    // when it moves).
+    assert_eq!(app.session_for_test().borrow().volume_percent, 100);
+    assert_eq!(app.ui_for_test().get_volume(), 100.0);
+}
+
+#[test]
 fn session_state_drives_the_overlay() {
     ensure_platform();
     let app = App::new().expect("testing backend must build the window");
@@ -203,9 +214,15 @@ fn prebuilt_captions_show_instantly_on_play() {
     );
 
     app.toggle_play_for_test();
+    let mut last_status = String::new();
     let caption_deadline = Instant::now() + Duration::from_secs(8);
     loop {
         app.pump_for_test(&last_pump);
+        let status = ui.get_status().to_string();
+        if status != last_status && !status.is_empty() {
+            last_status = status.clone();
+            eprintln!("status: {status}");
+        }
         let caption = ui.get_caption_text().to_string();
         let playhead = ui.get_playhead_ms();
         if !caption.trim().is_empty() && playhead < 4_000 {
@@ -214,7 +231,7 @@ fn prebuilt_captions_show_instantly_on_play() {
         }
         assert!(
             Instant::now() < caption_deadline,
-            "no prebuilt captions within 8 s; playhead: {playhead}, caption: {caption:?}"
+            "no prebuilt captions within 8 s; playhead: {playhead}, caption: {caption:?}, status: {status}"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
