@@ -39,7 +39,7 @@ fn ensure_platform() {
 #[test]
 fn window_builds_with_the_static_option_lists() {
     ensure_platform();
-    let app = App::new().expect("testing backend must build the window");
+    let app = App::new(None).expect("testing backend must build the window");
     let ui = &app.ui_for_test();
 
     assert!(!ui.get_playing());
@@ -61,7 +61,7 @@ fn window_builds_with_the_static_option_lists() {
 #[test]
 fn fresh_app_boots_at_full_volume() {
     ensure_platform();
-    let app = App::new().expect("testing backend must build the window");
+    let app = App::new(None).expect("testing backend must build the window");
     // A 0% default made the volume slider look mute and any interaction
     // with it silenced playback (the driver only learns the slider value
     // when it moves).
@@ -72,7 +72,7 @@ fn fresh_app_boots_at_full_volume() {
 #[test]
 fn session_state_drives_the_overlay() {
     ensure_platform();
-    let app = App::new().expect("testing backend must build the window");
+    let app = App::new(None).expect("testing backend must build the window");
     let ui = &app.ui_for_test();
     let session = app.session_for_test();
 
@@ -106,7 +106,7 @@ fn session_state_drives_the_overlay() {
 #[test]
 fn play_without_a_video_hints_in_the_status_line() {
     ensure_platform();
-    let app = App::new().expect("testing backend must build the window");
+    let app = App::new(None).expect("testing backend must build the window");
     app.toggle_play_for_test();
     assert!(
         app.session_for_test()
@@ -119,7 +119,7 @@ fn play_without_a_video_hints_in_the_status_line() {
 #[test]
 fn play_at_the_end_restarts_from_the_start() {
     ensure_platform();
-    let app = App::new().expect("testing backend must build the window");
+    let app = App::new(None).expect("testing backend must build the window");
     let session = app.session_for_test();
     session
         .borrow_mut()
@@ -144,7 +144,7 @@ fn play_at_the_end_restarts_from_the_start() {
 #[test]
 fn seek_buttons_do_not_double_borrow_the_session() {
     ensure_platform();
-    let app = App::new().expect("testing backend must build the window");
+    let app = App::new(None).expect("testing backend must build the window");
     let ui = &app.ui_for_test();
     app.session_for_test().borrow_mut().open_video(
         "clip.mp4",
@@ -165,7 +165,7 @@ fn seek_buttons_do_not_double_borrow_the_session() {
 #[test]
 fn caption_words_reach_the_overlay_while_playing() {
     ensure_platform();
-    let app = App::new().expect("testing backend must build the window");
+    let app = App::new(None).expect("testing backend must build the window");
     let ui = &app.ui_for_test();
     let session = app.session_for_test();
     session
@@ -204,7 +204,7 @@ fn prebuilt_captions_show_instantly_on_play() {
         return;
     }
 
-    let app = App::new().expect("testing backend must build the window");
+    let app = App::new(None).expect("testing backend must build the window");
     let ui = &app.ui_for_test();
     let session = app.session_for_test();
     // Route through the real combos so the orchestrator shares the session's
@@ -271,6 +271,29 @@ fn prebuilt_captions_show_instantly_on_play() {
 }
 
 #[test]
+fn launching_with_a_video_path_opens_it() {
+    ensure_platform();
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_assets/player-test.webm");
+    if !fixture.is_file() {
+        eprintln!("skipping: test_assets/player-test.webm not present");
+        return;
+    }
+    // A file passed on the command line (dropped onto the player, or an
+    // "Open with" launch) becomes the initial video.
+    let app = App::new(Some(fixture)).expect("testing backend must build the window");
+    let ui = &app.ui_for_test();
+    let last_pump = Rc::new(Cell::new(Instant::now()));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !ui.get_can_seek() && Instant::now() < deadline {
+        app.pump_for_test(&last_pump);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(ui.get_can_seek(), "the dropped video must open");
+    assert!(ui.get_file_title().contains("player-test.webm"));
+}
+
+#[test]
 fn cached_transcript_skips_the_batch_on_reopen() {
     ensure_platform();
     let fixture =
@@ -282,7 +305,7 @@ fn cached_transcript_skips_the_batch_on_reopen() {
     let _e2e = E2E_LOCK.lock().unwrap();
 
     // First run: pre-transcribe (the batch also caches the transcript).
-    let app = App::new().expect("testing backend must build the window");
+    let app = App::new(None).expect("testing backend must build the window");
     let ui = &app.ui_for_test();
     let session = app.session_for_test();
     ui.invoke_model_selected("tiny".into());
@@ -314,7 +337,7 @@ fn cached_transcript_skips_the_batch_on_reopen() {
 
     // Second run: the same file opens with the cached transcript restored;
     // no pre-transcribe click, no batch.
-    let app = App::new().expect("testing backend must build the window");
+    let app = App::new(None).expect("testing backend must build the window");
     let ui = &app.ui_for_test();
     let session = app.session_for_test();
     ui.invoke_model_selected("tiny".into());
@@ -382,7 +405,7 @@ fn live_captions_flow_end_to_end_with_a_real_video() {
         return;
     }
 
-    let app = App::new().expect("testing backend must build the window");
+    let app = App::new(None).expect("testing backend must build the window");
     let ui = &app.ui_for_test();
     // Route through the real combos so the orchestrator shares the session's
     // model/language (the cache key depends on it).

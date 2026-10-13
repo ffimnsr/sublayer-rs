@@ -33,8 +33,10 @@ pub struct App {
 }
 
 impl App {
-    /// Builds the window, the bridge, and the static option lists.
-    pub fn new() -> Result<Self, PlayerError> {
+    /// Builds the window, the bridge, and the static option lists; when
+    /// `initial_video` is set (a file dropped onto the player, or an "Open
+    /// with" launch), it is opened as soon as the event loop starts.
+    pub fn new(initial_video: Option<std::path::PathBuf>) -> Result<Self, PlayerError> {
         let ui = PlayerWindow::new()?;
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let bridge = Bridge::new(event_tx);
@@ -64,6 +66,9 @@ impl App {
             _timer: Timer::default(),
         };
         app.wire_callbacks();
+        if let Some(path) = initial_video {
+            app.bridge.open_video(path);
+        }
         app.start_pump();
         app.refresh();
         Ok(app)
@@ -356,6 +361,15 @@ pub(crate) fn handle_event(
             let sentences = guard.feed_words(words.clone());
             let translate_on = guard.translate_enabled && guard.translation_available();
             let playhead = guard.playhead_ms;
+            if guard.prebuilding {
+                // Decode progress: the newest word's timestamp vs the media
+                // length (stalled at 99 % until the batch completes).
+                if let Some(last) = words.last()
+                    && let Some(pct) = (last.end_ms * 100).checked_div(guard.duration_ms())
+                {
+                    guard.status = format!("pre-transcribing… {}%", pct.min(99));
+                }
+            }
             guard.refresh_caption(playhead);
             if translate_on {
                 for sentence in sentences {

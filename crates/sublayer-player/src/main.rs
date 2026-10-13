@@ -27,29 +27,40 @@ slint::include_modules!();
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if !args.is_empty() {
-        // With arguments the binary acts as a CLI (model downloads); without
-        // them it is the player window.
-        std::process::exit(match args[0].as_str() {
-            "download" => match cli::run(&args[1..]) {
-                Ok(()) => 0,
-                Err(error) => {
-                    eprintln!("error: {error}\n{}", cli::usage());
-                    1
-                }
-            },
+    let initial_video = if args.is_empty() {
+        None
+    } else {
+        match args[0].as_str() {
+            "download" => {
+                std::process::exit(match cli::run(&args[1..]) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        eprintln!("error: {error}\n{}", cli::usage());
+                        1
+                    }
+                });
+            }
             "--help" | "-h" | "help" => {
                 println!("{}", cli::usage());
-                0
+                std::process::exit(0);
             }
+            // A path that exists opens as the initial video: drag a file
+            // onto the player (or an "Open with" launcher) and it plays
+            // right away. Slint 1.18's winit backend has no external
+            // drag-and-drop API, so the file manager drop lands here.
             other => {
-                eprintln!("unknown subcommand `{other}`\n{}", cli::usage());
-                2
+                let path = std::path::Path::new(other);
+                if path.is_file() {
+                    Some(path.to_path_buf())
+                } else {
+                    eprintln!("unknown subcommand `{other}`\n{}", cli::usage());
+                    std::process::exit(2);
+                }
             }
-        });
-    }
+        }
+    };
     init_tracing();
-    match app::App::new().and_then(|app| app.run()) {
+    match app::App::new(initial_video).and_then(|app| app.run()) {
         Ok(()) => {}
         Err(error) => {
             eprintln!("error: {error}");

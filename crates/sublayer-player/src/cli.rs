@@ -45,7 +45,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
 pub fn usage() -> String {
     format!(
         "usage: sublayer-player [download <language…|all>]\n\
-         (no arguments starts the player window)\n\
+         (no arguments starts the player window; a video path opens it)\n\
          bundled languages: {BUNDLED}\n\
          downloads are verified against pinned SHA-256 digests",
     )

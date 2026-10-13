@@ -355,6 +355,10 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                 let Some(command) = command else { break };
                 match command {
                     Command::Open(path) => {
+                        // A new file replaces the current one: playback of
+                        // the old video ends now, not when the probe lands.
+                        drivers.stop_audio();
+                        drivers.stop_video();
                         prebuilding = false;
                         prebuilt_ready = false;
                         prebuilt_model = None;
@@ -407,7 +411,7 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                             ));
                             continue;
                         }
-                        let Some((path, _)) = video.as_ref() else {
+                        let Some((path, info)) = video.as_ref() else {
                             let _ = events.send(PlayerEvent::Status(
                                 "open a video first".to_owned(),
                             ));
@@ -440,19 +444,35 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                         prebuilding = true;
                         prebuilt_ready = false;
                         // Feed the whole track at full speed, in window-sized
-                        // pieces so the transcriber's buffer stays bounded.
+                        // pieces so the transcriber's buffer stays bounded;
+                        // surface extraction progress in the status line.
+                        let total_ms = (info.metadata.duration_seconds * 1_000.0) as u64;
                         let mut chunk = vec![0.0_f32; 64_000];
+                        let mut pushed_samples = 0_u64;
+                        let mut last_pct = 0_u8;
                         let mut stalled = false;
                         loop {
                             match stream.read_samples(&mut chunk).await {
                                 Ok(0) => break,
                                 Ok(n) => {
+                                    pushed_samples += n as u64;
                                     if captioner
                                         .push(chunk[..n].to_vec())
                                         .is_err()
                                     {
                                         stalled = true;
                                         break;
+                                    }
+                                    if let Some(pct) = ((pushed_samples * 1_000 / 16_000) * 100)
+                                        .checked_div(total_ms)
+                                    {
+                                        let pct = pct.min(99) as u8;
+                                        if pct != last_pct {
+                                            last_pct = pct;
+                                            let _ = events.send(PlayerEvent::Status(format!(
+                                                "pre-transcribing… {pct}%"
+                                            )));
+                                        }
                                     }
                                 }
                                 Err(error) => {
@@ -465,9 +485,13 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                             }
                         }
                         if !stalled {
-                            // The worker's `Flushed` marks the batch complete
-                            // (after the tail decode); playback then switches
-                            // to the pre-built timeline.
+                            // Extraction is done; whisper still decodes the
+                            // windows (its progress shows as word timestamps
+                            // pass the playhead). The worker's `Flushed`
+                            // marks the batch complete; playback then
+                            // switches to the pre-built timeline.
+                            let _ =
+                                events.send(PlayerEvent::Status("pre-transcribing… decoding".to_owned()));
                             let _ = captioner.flush();
                         }
                     }
