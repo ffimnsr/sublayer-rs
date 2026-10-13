@@ -128,7 +128,7 @@ impl Bridge {
         self.send(Command::SeekVideo(offset_ms));
     }
 
-    /// Playback volume in percent (0..=100).
+    /// Playback volume in percent (0..=150: unity at 100, boost past it).
     pub fn set_volume(&self, percent: u8) {
         self.send(Command::Volume(percent));
     }
@@ -374,6 +374,10 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
     let mut batch = BatchCaptioner::new();
     let mut translate = TranslateState::new(translate_root);
     let mut drivers = Drivers::default();
+    // Playback settings survive driver restarts: every play spawns a fresh
+    // audio driver, which would otherwise come back at 100 % and unmuted.
+    let mut volume_percent = 100_u8;
+    let mut muted = false;
     // Batch pre-transcription state: the captioner is busy with the whole
     // file while `prebuilding`; its `Flushed` event marks the batch done and
     // playback then shows the pre-built timeline without any ASR at all.
@@ -415,6 +419,8 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                             &mut drivers,
                             video.as_ref().map(|(path, info)| (path.clone(), info.metadata.clone())),
                             offset_ms,
+                            volume_percent,
+                            muted,
                             &events,
                         )
                         .await;
@@ -510,6 +516,11 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                             let _ =
                                 events.send(PlayerEvent::Status("pre-transcribing… decoding".to_owned()));
                             let _ = captioner.flush();
+                        } else {
+                            // The feed died mid-batch; let the user retry
+                            // instead of rejecting every later click with
+                            // "already pre-transcribing".
+                            prebuilding = false;
                         }
                     }
                     Command::Pause => {
@@ -520,14 +531,21 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                     }
                     Command::Stop => {
                         drivers.stop_audio();
-                        drivers.stop_video();
+                        // Rewind the picture: the video driver stays alive
+                        // and reopens its decoder at the start, so the stop
+                        // button shows the first frame instead of leaving
+                        // the last one on screen.
+                        if let Some(tx) = &drivers.video_tx {
+                            let _ = tx.send(VideoCommand::Start { offset_ms: 0 });
+                        }
                         let _ = events.send(PlayerEvent::Status("stopped".to_owned()));
                     }
                     Command::Seek(offset_ms) => {
                         if let Some(tx) = &drivers.audio_tx {
-                            // The driver restarts its decoder at the new
-                            // offset; no captioner timeline to reset anymore.
-                            let _ = tx.send(AudioCommand::Start { offset_ms });
+                            // Restart just the decode pipe: the running
+                            // helper is reused, so the audio gap is the
+                            // ffmpeg restart, not a fresh helper probe.
+                            let _ = tx.send(AudioCommand::Seek { offset_ms });
                         }
                         if let Some(tx) = &drivers.video_tx {
                             let _ = tx.send(VideoCommand::Start { offset_ms });
@@ -541,13 +559,15 @@ async fn orchestrator(mut commands: UnboundedReceiver<Command>, events: Sender<P
                         }
                     }
                     Command::Volume(percent) => {
+                        volume_percent = percent;
                         if let Some(tx) = &drivers.audio_tx {
                             let _ = tx.send(AudioCommand::SetVolume(percent));
                         }
                     }
-                    Command::Mute(muted) => {
+                    Command::Mute(muted_now) => {
+                        muted = muted_now;
                         if let Some(tx) = &drivers.audio_tx {
-                            let _ = tx.send(AudioCommand::SetMute(muted));
+                            let _ = tx.send(AudioCommand::SetMute(muted_now));
                         }
                     }
                     Command::Model(model) => {
@@ -697,12 +717,15 @@ async fn next_audio_event(
     }
 }
 
-/// Ensures the audio and video drivers are running at `offset_ms`. `video`
-/// is `None` after a failed open. Returns whether playback started.
+/// Ensures the audio and video drivers are running at `offset_ms`, with the
+/// current volume/mute settings re-applied (a fresh driver boots at unity).
+/// `video` is `None` after a failed open. Returns whether playback started.
 async fn start_drivers(
     drivers: &mut Drivers,
     video: Option<(PathBuf, VideoMetadata)>,
     offset_ms: u64,
+    volume_percent: u8,
+    muted: bool,
     events: &Sender<PlayerEvent>,
 ) -> bool {
     let Some((video, metadata)) = video else {
@@ -712,7 +735,13 @@ async fn start_drivers(
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     drivers.audio_events = Some(events_rx);
     let (command_tx, command_rx) = mpsc::unbounded_channel();
-    tokio::spawn(run_audio_driver(video.clone(), command_rx, events_tx));
+    tokio::spawn(run_audio_driver(
+        video.clone(),
+        volume_percent,
+        muted,
+        command_rx,
+        events_tx,
+    ));
     let _ = command_tx.send(AudioCommand::Start { offset_ms });
     drivers.audio_tx = Some(command_tx);
 

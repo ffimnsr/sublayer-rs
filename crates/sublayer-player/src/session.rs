@@ -237,13 +237,18 @@ impl Session {
     /// card, in inter-card gaps, and for a while after a card ends it falls
     /// back to the rolling word line.
     fn prebuilt_caption(&self, playhead_ms: u64) -> String {
-        let index = self
+        // The last card that already started; before the first card starts
+        // there is nothing to show but the rolling word line.
+        let started = self
             .prebuilt_cards
-            .partition_point(|card| card.start_ms <= playhead_ms)
-            .saturating_sub(1);
-        if let Some(card) = self.prebuilt_cards.get(index)
-            && playhead_ms <= card.end_ms.saturating_add(PREBUILT_LINGER_MS)
-        {
+            .partition_point(|card| card.start_ms <= playhead_ms);
+        let Some(card) = started
+            .checked_sub(1)
+            .and_then(|index| self.prebuilt_cards.get(index))
+        else {
+            return self.prebuilt_word_line(playhead_ms);
+        };
+        if playhead_ms <= card.end_ms.saturating_add(PREBUILT_LINGER_MS) {
             if self.translate_enabled
                 && let Some(translated) = &card.translation
             {
@@ -312,7 +317,7 @@ impl Session {
     /// Stores the current transcript under the XDG cache directory when one
     /// is configured; failures are silent (the batch simply re-runs next
     /// time).
-    fn save_transcript_cache(&self) {
+    pub(crate) fn save_transcript_cache(&self) {
         let (Some(dir), Some(path)) = (&self.transcript_dir, &self.video_path) else {
             return;
         };
@@ -336,6 +341,17 @@ impl Session {
         {
             card.translation = Some(text);
         }
+    }
+
+    /// Source sentences of the cards that still wait for their translation,
+    /// in timeline (= submission) order. Used to backfill translations when
+    /// the toggle is turned on for a transcript built without them.
+    pub fn untranslated_sources(&self) -> Vec<String> {
+        self.prebuilt_cards
+            .iter()
+            .filter(|card| card.translation.is_none())
+            .map(|card| card.source.clone())
+            .collect()
     }
 
     /// Whether every pre-built card has its translation.
@@ -633,6 +649,41 @@ mod tests {
         install_batch(&mut session, &[("Hallo", 0), ("Welt.", 300)]);
         session.refresh_caption(400);
         assert_eq!(session.caption_text, "Hallo Welt.");
+    }
+
+    #[test]
+    fn no_caption_before_the_first_card_starts() {
+        // Regression: the prebuilt caption lookup used to clamp to the first
+        // card, showing the opening line over intro music before it started.
+        let mut session = Session::default();
+        install_batch(&mut session, &[("Hallo", 10_000), ("Welt.", 10_300)]);
+        session.refresh_caption(4_000);
+        assert!(
+            session.caption_text.is_empty(),
+            "nothing may show before the first card starts"
+        );
+        session.refresh_caption(10_400);
+        assert_eq!(session.caption_text, "Hallo Welt.");
+        session.refresh_caption(60_000);
+        assert!(
+            session.caption_text.is_empty(),
+            "nothing lingers long after the card ended"
+        );
+    }
+
+    #[test]
+    fn invalidate_prebuilt_drops_captions_until_the_next_batch() {
+        let mut session = Session::default();
+        install_batch(&mut session, &[("Hallo", 0), ("Welt.", 300)]);
+        session.refresh_caption(400);
+        assert_eq!(session.caption_text, "Hallo Welt.");
+
+        // A model or language switch invalidates the transcript.
+        session.invalidate_prebuilt();
+        assert!(!session.prebuilt_ready);
+        assert_eq!(session.prebuilt_word_count(), 0);
+        session.refresh_caption(400);
+        assert!(session.caption_text.is_empty());
     }
 
     #[test]

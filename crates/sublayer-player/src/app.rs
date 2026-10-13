@@ -240,18 +240,39 @@ impl App {
                     Some(pair) => {
                         guard.status = format!("translating {} → English", pair.display_name)
                     }
+                    None if guard.translation_code().is_none() => {
+                        // Language detection happens during the batch; until
+                        // one runs there is nothing to translate.
+                        guard.status = "translation needs a pre-transcribed language".to_owned()
+                    }
                     None => {
                         guard.status =
                             "no bundled pair for this language; translation off".to_owned()
                     }
                 }
+                // A transcript built with translation off has empty card
+                // slots; submit the pending sentences now so the toggle
+                // takes effect without a new batch (their translations
+                // stream back and fill the slots in submission order).
+                if guard.prebuilt_ready && guard.translation_available() {
+                    let pending = guard.untranslated_sources();
+                    drop(guard);
+                    for sentence in pending {
+                        bridge.translate_sentence(sentence);
+                    }
+                } else {
+                    let playhead = guard.playhead_ms;
+                    guard.refresh_caption(playhead);
+                    drop(guard);
+                }
             } else {
                 guard.status.clear();
+                let playhead = guard.playhead_ms;
+                guard.refresh_caption(playhead);
+                drop(guard);
             }
-            let playhead = guard.playhead_ms;
-            guard.refresh_caption(playhead);
-            ui.set_status(guard.status.clone().into());
-            ui.set_caption_text(guard.caption_text.clone().into());
+            ui.set_status(session.borrow().status.clone().into());
+            ui.set_caption_text(session.borrow().caption_text.clone().into());
             bridge.set_translate(enabled);
         });
 
@@ -412,6 +433,11 @@ pub(crate) fn handle_event(
                 // Batch mode: the translation belongs to the pre-built
                 // card the worker just finished (submitted in order).
                 guard.attach_prebuilt_translation(text.clone());
+                if guard.translations_done() {
+                    // The cache snapshot taken when the batch finished
+                    // predates the translations; persist them too.
+                    guard.save_transcript_cache();
+                }
             }
         }
         PlayerEvent::Frame { pts_ms, frame } => {
@@ -459,7 +485,13 @@ fn detected_label(session: &Session) -> String {
         return String::new();
     }
     let Some(code) = session.detected_language.as_deref() else {
-        return "detecting language…".to_owned();
+        // Detection runs during a pre-transcription batch; before one
+        // starts there is nothing to report.
+        return if session.prebuilding {
+            "detecting language…".to_owned()
+        } else {
+            String::new()
+        };
     };
     let display = session
         .translation_pair()
@@ -540,6 +572,9 @@ fn refresh(ui: &PlayerWindow, session: &Rc<RefCell<Session>>) {
         ui.set_status(guard.status.clone().into());
         ui.set_playhead_ms(guard.playhead_ms as i32);
         ui.set_duration_ms(guard.duration_ms() as i32);
+        if !guard.scrubbing {
+            ui.set_seek_value(guard.playhead_ms as f32);
+        }
         let label = format!(
             "{} / {}",
             format_time(guard.playhead_ms),
@@ -579,6 +614,11 @@ fn refresh_playhead(ui: &PlayerWindow, session: &Rc<RefCell<Session>>) {
     let guard = session.borrow();
     ui.set_playhead_ms(guard.playhead_ms as i32);
     ui.set_duration_ms(guard.duration_ms() as i32);
+    // The seek slider is two-way bound to `seek-value`; while a drag is in
+    // flight the knob is authoritative and must not be written back.
+    if !guard.scrubbing {
+        ui.set_seek_value(guard.playhead_ms as f32);
+    }
     let label = format!(
         "{} / {}",
         format_time(guard.playhead_ms),

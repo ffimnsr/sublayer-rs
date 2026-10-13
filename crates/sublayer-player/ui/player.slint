@@ -18,7 +18,14 @@ export component PlayerWindow inherits Window {
 
     in property <int> playhead_ms: 0;
     in property <int> duration_ms: 0;
-    in property <float> volume: 100;
+    // Two-way with the seek slider below: the knob drives the model while
+    // dragging, and the model drives the knob as the playhead advances. A
+    // one-way `value: …` binding would be destroyed by the widget's own
+    // assignment on the first drag, after which the knob would stop
+    // tracking the playhead.
+    in-out property <float> seek_value: 0;
+    // Same two-way contract for the volume knob (see the volume slider).
+    in-out property <float> volume: 100;
     in property <image> frame;
 
     in property <[string]> models: [];
@@ -179,10 +186,14 @@ export component PlayerWindow inherits Window {
                 enabled: root.can_seek;
                 clicked => { root.seek_by(5000); }
             }
-            Slider {
+            seek-slider := Slider {
                 minimum: 0;
                 maximum: root.duration_ms;
-                value: Math.min(root.playhead_ms, root.duration_ms);
+                value <=> root.seek_value;
+                // Arrow keys on a focused slider step by this amount, so
+                // they match the global ±5 s seek shortcut (Home/End jump
+                // to the ends either way).
+                step: 5000;
                 enabled: root.can_seek;
                 // Dragging only scrubs the display; the decoders restart at
                 // the final position once the knob is released, so video,
@@ -199,10 +210,10 @@ export component PlayerWindow inherits Window {
                 width: 44px;
                 clicked => { root.mute_toggled(); }
             }
-            Slider {
+            volume-slider := Slider {
                 minimum: 0;
                 maximum: 150;
-                value: root.volume;
+                value <=> root.volume;
                 width: 120px;
                 changed(value) => { root.volume_changed(value); }
             }

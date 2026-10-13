@@ -9,6 +9,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use i_slint_backend_testing as testing;
+use slint::ComponentHandle;
 use slint::Model;
 
 use crate::PlayerWindow;
@@ -91,7 +92,7 @@ fn session_state_drives_the_overlay() {
         sublayer_core::WordToken::new("world.", 500, 900),
     ]);
     session.borrow_mut().mark_prebuilt_ready();
-    session.borrow_mut().refresh_caption(1_500);
+    session.borrow_mut().playhead_ms = 1_500;
     app.refresh_for_test();
     assert_eq!(ui.get_caption_text().as_str(), "Hello world.");
 
@@ -100,7 +101,6 @@ fn session_state_drives_the_overlay() {
     session
         .borrow_mut()
         .attach_prebuilt_translation("¡Hola mundo!".to_owned());
-    session.borrow_mut().refresh_caption(1_500);
     app.refresh_for_test();
     assert_eq!(ui.get_caption_text().as_str(), "¡Hola mundo!");
     assert!(ui.get_translate_enabled());
@@ -296,6 +296,96 @@ fn install_batch(session: &mut Session, words: &[sublayer_core::WordToken]) {
     session.prebuilding = true;
     session.feed_words(words.to_vec());
     session.mark_prebuilt_ready();
+}
+
+/// Lays out the window and returns the seek slider's element handle.
+fn seek_slider(ui: &PlayerWindow) -> testing::ElementHandle {
+    // Without a window size the item tree has no geometry to hit-test, so
+    // the click would land nowhere.
+    ui.window()
+        .set_size(slint::LogicalSize::new(1_100.0, 720.0));
+    testing::ElementHandle::find_by_element_id(ui, "PlayerWindow::seek-slider")
+        .next()
+        .expect("the seek slider must be reachable by id")
+}
+
+#[test]
+fn clicking_the_seek_slider_commits_a_seek_and_syncs_the_caption() {
+    ensure_platform();
+    let app = App::new(None).expect("testing backend must build the window");
+    let ui = &app.ui_for_test();
+    let session = app.session_for_test();
+    session
+        .borrow_mut()
+        .open_video("clip.mp4", 60_000, std::path::PathBuf::from("clip.mp4"));
+    install_batch(
+        &mut session.borrow_mut(),
+        &[
+            sublayer_core::WordToken::new("First", 0, 300),
+            sublayer_core::WordToken::new("part.", 400, 700),
+            sublayer_core::WordToken::new("Second", 29_000, 29_300),
+            sublayer_core::WordToken::new("part.", 29_400, 29_700),
+        ],
+    );
+    app.refresh_for_test();
+
+    // A real click on the middle of the slider track: the widget must commit
+    // a seek (old bug: the click only moved the display, never the decoders).
+    let slider = seek_slider(ui);
+    slider.mock_single_click(slint::platform::PointerEventButton::Left);
+    let playhead = ui.get_playhead_ms();
+    assert!(
+        (29_500..=30_500).contains(&playhead),
+        "a center click seeks to ~50 % of the 60 s media; got {playhead} ms"
+    );
+    assert!(!session.borrow().scrubbing, "the click released the knob");
+    assert_eq!(
+        ui.get_caption_text().as_str(),
+        "Second part.",
+        "the caption follows the committed seek"
+    );
+    // The widget's assignment reached the model through the two-way binding
+    // (a one-way `value:` binding would have been destroyed by the drag).
+    assert_eq!(ui.get_seek_value(), playhead as f32);
+}
+
+#[test]
+fn dragging_the_seek_slider_commits_the_release_position() {
+    ensure_platform();
+    let app = App::new(None).expect("testing backend must build the window");
+    let ui = &app.ui_for_test();
+    let session = app.session_for_test();
+    session
+        .borrow_mut()
+        .open_video("clip.mp4", 60_000, std::path::PathBuf::from("clip.mp4"));
+    install_batch(
+        &mut session.borrow_mut(),
+        &[
+            sublayer_core::WordToken::new("First", 0, 300),
+            sublayer_core::WordToken::new("part.", 400, 700),
+        ],
+    );
+    app.refresh_for_test();
+    // Start playback so the commit goes through the playing seek path.
+    session.borrow_mut().playing = true;
+
+    let slider = seek_slider(ui);
+    let position = slider.absolute_position();
+    let size = slider.size();
+    // Drag from the center to the far left edge of the track.
+    slider.mock_drag(
+        slint::LogicalPosition::new(position.x + 2.0, position.y + size.height / 2.0),
+        slint::platform::PointerEventButton::Left,
+    );
+
+    let playhead = ui.get_playhead_ms();
+    assert!(
+        playhead < 2_000,
+        "the drag must commit its release position; got {playhead} ms"
+    );
+    assert!(!session.borrow().scrubbing);
+    assert_eq!(ui.get_seek_value(), playhead as f32);
+    assert_eq!(ui.get_caption_text().as_str(), "First part.");
 }
 
 #[test]

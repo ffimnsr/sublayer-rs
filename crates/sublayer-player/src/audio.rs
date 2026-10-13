@@ -47,12 +47,16 @@ const SPEAKER_CHUNK_SAMPLES: usize = OUTPUT_RATE as usize * OUTPUT_CHANNELS as u
 
 /// Commands sent to the audio driver.
 pub enum AudioCommand {
-    /// (Re)starts playback at `offset_ms`: kills the old decoders, resets the
-    /// captioner timeline, and spawns fresh ffmpeg pipes.
+    /// (Re)starts playback at `offset_ms` (play / resume): probes an audio
+    /// helper and spawns a fresh ffmpeg decode pipe.
     Start { offset_ms: u64 },
-    /// Stops the decoders and exits the driver (pause / stop / seek).
+    /// Seeks at `offset_ms` (media playing): restarts only the decode pipe;
+    /// the running helper is kept, so the audio gap is just the ffmpeg
+    /// restart instead of a full helper probe.
+    Seek { offset_ms: u64 },
+    /// Stops the decoder and exits the driver (pause / stop).
     Stop,
-    /// Volume in percent (0..=100).
+    /// Volume in percent (0..=150, unity at 100).
     SetVolume(u8),
     /// Mute override.
     SetMute(bool),
@@ -61,7 +65,7 @@ pub enum AudioCommand {
 /// Events emitted by the audio driver.
 #[derive(Debug)]
 pub enum AudioEvent {
-    /// The media hit EOF (or the audio helper died mid-stream).
+    /// The media reached EOF (the end of the speaker decode pipe).
     Ended,
     /// Recoverable condition worth showing in the status line.
     Log(String),
@@ -69,14 +73,19 @@ pub enum AudioEvent {
 
 /// Runs the driver until `commands` closes or a `Stop` arrives.
 ///
-/// The media end (EOF on the speaker decode pipe) is reported as `Ended`.
+/// `volume_percent` and `muted_initial` are the playback settings the
+/// previous driver session ended with; a fresh driver boots with them (a
+/// restart must not jump back to unity volume / unmuted). The media end (EOF
+/// on the speaker decode pipe) is reported as `Ended`.
 pub async fn run_audio_driver(
     video: PathBuf,
+    volume_percent: u8,
+    muted_initial: bool,
     mut commands: mpsc::UnboundedReceiver<AudioCommand>,
     events: UnboundedSender<AudioEvent>,
 ) {
-    let volume = Arc::new(AtomicU32::new(1_000));
-    let muted = Arc::new(AtomicBool::new(false));
+    let volume = Arc::new(AtomicU32::new(volume_scaled(volume_percent)));
+    let muted = Arc::new(AtomicBool::new(muted_initial));
 
     let mut speaker: Option<AudioPcmStream> = None;
     let mut helper: Option<AudioHelper> = None;
@@ -100,26 +109,46 @@ pub async fn run_audio_driver(
                         consumed = 0;
                         started_at = None;
                         helper = AudioHelper::spawn(&events, &volume, &muted).await;
-                        match stream_pcm_s16le(&video, Some(offset_ms), OUTPUT_RATE, OUTPUT_CHANNELS)
-                            .await
+                        if let Err(error) = stream_pcm_s16le(
+                            &video,
+                            Some(offset_ms),
+                            OUTPUT_RATE,
+                            OUTPUT_CHANNELS,
+                        )
+                        .await
                         {
-                            Ok(stream) => {
-                                speaker = Some(stream);
-                                started_at = Some(Instant::now());
-                            }
-                            Err(error) => {
-                                let _ = helper.take();
-                                let _ = events.send(AudioEvent::Log(format!(
-                                    "audio decode failed: {error}"
-                                )));
-                            }
+                            let _ = events.send(AudioEvent::Log(format!(
+                                "audio decode failed: {error}"
+                            )));
+                        } else {
+                            started_at = Some(Instant::now());
+                        }
+                    }
+                    Some(AudioCommand::Seek { offset_ms }) => {
+                        // Restart only the decode pipe; the helper stays so
+                        // the seek does not wait through another probe.
+                        speaker = None;
+                        consumed = 0;
+                        started_at = None;
+                        if let Err(error) = stream_pcm_s16le(
+                            &video,
+                            Some(offset_ms),
+                            OUTPUT_RATE,
+                            OUTPUT_CHANNELS,
+                        )
+                        .await
+                        {
+                            let _ = events.send(AudioEvent::Log(format!(
+                                "audio decode failed: {error}"
+                            )));
+                        } else {
+                            started_at = Some(Instant::now());
                         }
                     }
                     Some(AudioCommand::SetVolume(percent)) => {
                         // The slider runs 0..=150 %: unity at 100, boost past
                         // it (peaks clip in `to_s16le`).
-                        let scaled = u32::from(percent).saturating_mul(10).min(1_500);
-                        volume.store(scaled, Ordering::Relaxed);
+                        volume.store(volume_scaled(percent), Ordering::Relaxed);
                     }
                     Some(AudioCommand::SetMute(mute)) => {
                         muted.store(mute, Ordering::Relaxed);
@@ -152,6 +181,12 @@ pub async fn run_audio_driver(
             }
         }
     }
+}
+
+/// Maps the 0..=150 % slider to the internal gain storage (10× for .1 %
+/// resolution, capped at 150 % actually settable by the slider).
+fn volume_scaled(percent: u8) -> u32 {
+    u32::from(percent).saturating_mul(10).min(1_500)
 }
 
 /// Why a read did not fill its buffer.
